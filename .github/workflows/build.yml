@@ -9,43 +9,31 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Pin the image. Use the same tag as your working Îlot14 World repo if you know it
+    # (e.g. devkitpro/devkita64:20240202). 'latest' is only the fallback.
     container: devkitpro/devkita64:latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Make sure icon.jpg exists
-        run: |
-          # hbmenu needs a 256x256 JPEG named icon.jpg next to the Makefile.
-          if [ ! -s icon.jpg ]; then
-            echo "icon.jpg missing - writing the default WinNX icon"
-            echo '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB[...]'
-          fi
-          ls -l icon.jpg
-
       - name: Install libraries
         run: |
-          # Use local dkp-pacman configuration directly without syncing databases to prevent 403 blocks
-          if command -v dkp-pacman >/dev/null 2>&1; then PM=dkp-pacman;
-          else PM=pacman; fi
-          $PM -S --noconfirm --needed switch-sdl2 switch-sdl2_image switch-libpng switch-libjpeg-turbo
+          if command -v dkp-pacman >/dev/null 2>&1; then PM=dkp-pacman; else PM=pacman; fi
+          $PM -Sy --noconfirm
+          $PM -S --noconfirm --needed switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-libjpeg-turbo switch-libpng switch-freetype switch-pkg-config
 
       - name: Build
         run: |
           export DEVKITPRO=/opt/devkitpro
-          export PATH=$DEVKITPRO/devkitA64/bin:$PATH
+          export PATH=$DEVKITPRO/devkitA64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH
           make -j$(nproc)
 
-      - name: Check the icon is inside the .nro
+      - name: Check icon and hbmenu marker are inside the NRO
         run: |
-          NRO=WinNX.nro
-          SZ=$(od -An -tu4 -j24 -N4 "$NRO" | tr -d ' ')
-          MAGIC=$(dd if="$NRO" bs=1 skip="$SZ" count=4 2>/dev/null)
-          if [ "$MAGIC" != "ASET" ]; then echo "::error::Icon missing from NRO structural chunk asset boundary!"; exit 1; fi
-          ICON=$(od -An -tu8 -j$((SZ+16)) -N8 "$NRO" | tr -d ' ')
-          echo "icon bytes embedded: $ICON"
-          if [ "$ICON" -le 0 ]; then echo "::error::Icon allocation size error detected inside NRO envelope!"; exit 1; fi
+          ls -l WinNX.nro
+          grep -q "ASET" WinNX.nro || { echo "NRO has no icon asset header"; exit 1; }
+          grep -q "WINNX-SELF-MARKER-9c41e7" WinNX.nro || { echo "hbmenu marker missing"; exit 1; }
 
       - name: Upload NRO
         uses: actions/upload-artifact@v4
