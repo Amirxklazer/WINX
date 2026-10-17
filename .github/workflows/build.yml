@@ -9,19 +9,27 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Pin the image. Use the same tag as your working Îlot14 World repo if you know it
-    # (e.g. devkitpro/devkita64:20240202). 'latest' is only the fallback.
     container: devkitpro/devkita64:latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Make sure icon.jpg exists
+        run: |
+          # hbmenu needs a 256x256 JPEG named icon.jpg next to the Makefile.
+          # If it is missing from the repo, write the built-in WinNX icon so the build never ships icon-less.
+          if [ ! -s icon.jpg ]; then
+            echo "icon.jpg missing - writing the default WinNX icon"
+            echo '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' | base64 -d > icon.jpg
+          fi
+          ls -l icon.jpg
+
       - name: Install libraries
         run: |
           if command -v dkp-pacman >/dev/null 2>&1; then PM=dkp-pacman; else PM=pacman; fi
           $PM -Sy --noconfirm
-          $PM -S --noconfirm --needed switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-libjpeg-turbo switch-libpng switch-freetype switch-pkg-config
+          $PM -S --noconfirm --needed switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-freetype switch-libjpeg-turbo switch-libpng switch-pkg-config
 
       - name: Build
         run: |
@@ -29,10 +37,19 @@ jobs:
           export PATH=$DEVKITPRO/devkitA64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH
           make -j$(nproc)
 
+      - name: Check the icon is inside the .nro
+        run: |
+          NRO=WinNX.nro
+          SZ=$(od -An -tu4 -j24 -N4 "$NRO" | tr -d ' ')
+          MAGIC=$(dd if="$NRO" bs=1 skip="$SZ" count=4 2>/dev/null)
+          if [ "$MAGIC" != "ASET" ]; then echo "::error::No asset section in $NRO - the icon did not get embedded"; exit 1; fi
+          ICON=$(od -An -tu8 -j$((SZ+16)) -N8 "$NRO" | tr -d ' ')
+          echo "icon bytes embedded: $ICON"
+          if [ "$ICON" -le 0 ]; then echo "::error::Icon is empty in $NRO"; exit 1; fi
+
       - name: Upload NRO
         uses: actions/upload-artifact@v4
         with:
           name: WinNX
           path: "*.nro"
           if-no-files-found: error
-          
