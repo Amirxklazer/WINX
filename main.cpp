@@ -1,4 +1,4 @@
-// WinNX v0.2 - Windows 8.1-style tablet shell for Nintendo Switch (SDL2 + libnx)
+// WinNX v0.3 - Windows 8.1-style tablet shell for Nintendo Switch (SDL2 + libnx)
 // Touch-first. Black "bezel" strip at the bottom holds the Windows button (OLED friendly).
 // Everything you write (Notes, Word, Excel) autosaves to sdmc:/switch/WinNX/ and reloads next time.
 #include <switch.h>
@@ -16,6 +16,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <ctime>
 
 static const int W = 1280, H = 720, UIH = 668; // UIH = screen area above the black bezel strip
 static const int KBH = 300, KBTOP = UIH - KBH;
@@ -51,9 +52,9 @@ static const Theme THEMES[4] = {
 };
 static int gTheme = 0;
 static bool gBurn = true, g24 = true;
-static bool gInstalled[2] = {false, false}; // Word 2016, Excel 2016
 static int gDocFont = F22;
 static bool gBold = false;
+static int gEngine = 0; // CMrhoe search engine: 0 DuckDuckGo, 1 Google, 2 Bing
 
 static std::string gUser = "User";
 static u32 gBat = 0;
@@ -118,6 +119,44 @@ static void text(const std::string& s, int f, int x, int y, Col c, int align = 0
     if (it == gTC.end()) {
         SDL_Color white = {255, 255, 255, 255};
         SDL_Surface* sf = TTF_RenderUTF8_Blended(gFont[f], s.c_str(), white);
+        if (!sf) return;
+        TT tt;
+        tt.t = SDL_CreateTextureFromSurface(gR, sf);
+        tt.w = sf->w; tt.h = sf->h;
+        SDL_FreeSurface(sf);
+        if (!tt.t) return;
+        SDL_SetTextureBlendMode(tt.t, SDL_BLENDMODE_BLEND);
+        it = gTC.emplace(key, tt).first;
+    }
+    TT& tt = it->second;
+    int dx = x;
+    if (align == 1) dx = x - tt.w / 2;
+    else if (align == 2) dx = x - tt.w;
+    SDL_SetTextureColorMod(tt.t, c.r, c.g, c.b);
+    SDL_SetTextureAlphaMod(tt.t, (Uint8)a);
+    SDL_Rect d = {dx, y, tt.w, tt.h};
+    SDL_RenderCopy(gR, tt.t, nullptr, &d);
+}
+// styled text: style bits 1 bold, 2 italic, 4 underline (SDL_ttf synthesises them)
+static int twS(const std::string& s, int f, int style) {
+    int w = 0, h = 0;
+    if (gFont[f] && !s.empty()) {
+        TTF_SetFontStyle(gFont[f], style);
+        TTF_SizeUTF8(gFont[f], s.c_str(), &w, &h);
+        TTF_SetFontStyle(gFont[f], 0);
+    }
+    return w;
+}
+static void textS(const std::string& s, int f, int x, int y, Col c, int style, int align = 0, int a = 255) {
+    if (style == 0) { text(s, f, x, y, c, align, a); return; }
+    if (s.empty() || !gFont[f]) return;
+    std::string key = "S" + std::to_string(style) + "|" + std::to_string(f) + "|" + s;
+    auto it = gTC.find(key);
+    if (it == gTC.end()) {
+        SDL_Color white = {255, 255, 255, 255};
+        TTF_SetFontStyle(gFont[f], style);
+        SDL_Surface* sf = TTF_RenderUTF8_Blended(gFont[f], s.c_str(), white);
+        TTF_SetFontStyle(gFont[f], 0);
         if (!sf) return;
         TT tt;
         tt.t = SDL_CreateTextureFromSurface(gR, sf);
@@ -214,7 +253,20 @@ static std::string lower(std::string s) { for (auto& c : s) c = (char)tolower((u
 static bool endsWith(const std::string& s, const std::string& e) { return s.size() >= e.size() && s.compare(s.size() - e.size(), e.size(), e) == 0; }
 
 // ---------------------------------------------------------------- tiles / apps
-enum { A_MAIL, A_MUSIC, A_PHOTOS, A_DESKTOP, A_CALENDAR, A_STORE, A_CALC, A_NOTES, A_WEATHER, A_CLOCK, A_SETTINGS, A_POWER, A_GAMES, A_WORD, A_EXCEL, A_COUNT };
+enum { A_MAIL, A_MUSIC, A_PHOTOS, A_DESKTOP, A_CALENDAR, A_STORE, A_CALC, A_NOTES, A_WEATHER, A_CLOCK, A_SETTINGS, A_POWER, A_GAMES, A_WORD, A_EXCEL,
+       A_BROWSER, A_PAINT, A_2048, A_MINES, A_SNAKE, A_TODO, A_FILES, A_TASKMGR, A_TIMER, A_COUNT };
+
+// Apps that can be installed from the Store (all built in; "installing" adds a Start tile)
+struct SApp { int app; const char* name; const char* cat; const char* d1; const char* d2; Col col; int w; const char* glyph; int stars; const char* rate; };
+static const SApp STORE[] = {
+    {A_BROWSER, "CMrhoe", "Internet", "Amir's browser: search the web or type an address.", "Bookmarks, history and three search engines (DuckDuckGo, Google, Bing). Pages open in the Switch web engine, so you need Wi-Fi.", {219, 68, 55}, 2, "C", 5, "2,431"},
+    {A_WORD, "Word 2016", "Productivity", "Write letters and documents.", "Autosaves to your SD card. Bold, text size, word count.", {43, 87, 154}, 2, "W", 5, "9,812"},
+    {A_PAINT, "Paint", "Art", "Draw with your finger.", "Brush, eraser, fill, line, rectangle and oval tools, 16 colours, undo. Save pictures you can open in Photos or put into Word.", {200, 70, 160}, 1, "P", 4, "5,320"},
+    {A_EXCEL, "Excel 2016", "Productivity", "Spreadsheets with formulas.", "SUM, AVERAGE, MIN, MAX, COUNT and cell references like =A1+B2. Autosaves.", {33, 115, 70}, 2, "X", 5, "7,104"},
+};
+static const int NSTORE = (int)(sizeof(STORE) / sizeof(STORE[0]));
+static bool gInst[A_COUNT];
+static const char* CATS[5] = {"Games", "Productivity", "Internet", "Art", "Tools"};
 
 struct Tile { int col, row, w, h; Col color; const char* label; int app; };
 static const Tile BASE[] = {
@@ -237,7 +289,7 @@ static const int U = 156, G = 8, LEFT = 90, TOP = 140;
 static float scrollX = 0, scrollV = 0, maxScroll = 0;
 static int sel = 0;
 
-static int groupExtra(int col) { return (col >= 2 ? 36 : 0) + (col >= 4 ? 36 : 0) + (col >= 6 ? 36 : 0) + (col >= 8 ? 36 : 0); }
+static int groupExtra(int col) { return 36 * (col / 2); }
 static SDL_Rect tileBase(int i) {
     const Tile& t = gTiles[i];
     SDL_Rect r;
@@ -249,9 +301,25 @@ static SDL_Rect tileBase(int i) {
 }
 static void rebuildTiles() {
     gTiles.assign(BASE, BASE + sizeof(BASE) / sizeof(BASE[0]));
-    int row = 0;
-    if (gInstalled[0]) gTiles.push_back(Tile{8, row++, 2, 1, {43, 87, 154}, "Word 2016", A_WORD});
-    if (gInstalled[1]) gTiles.push_back(Tile{8, row++, 2, 1, {33, 115, 70}, "Excel 2016", A_EXCEL});
+    // installed Store apps are packed into extra groups (2 columns x 3 rows each) to the right
+    std::vector<char> occ; // 6 cells per group
+    for (int i = 0; i < NSTORE; i++) {
+        const SApp& a = STORE[i];
+        if (!gInst[a.app]) continue;
+        bool placed = false;
+        for (int g = 0; !placed; g++) {
+            if ((int)occ.size() < 6 * (g + 1)) occ.resize(6 * (g + 1), 0);
+            for (int r = 0; r < 3 && !placed; r++)
+                for (int c = 0; c + a.w <= 2 && !placed; c++) {
+                    bool ok = true;
+                    for (int k = 0; k < a.w; k++) if (occ[6 * g + r * 2 + c + k]) ok = false;
+                    if (!ok) continue;
+                    for (int k = 0; k < a.w; k++) occ[6 * g + r * 2 + c + k] = 1;
+                    gTiles.push_back(Tile{8 + 2 * g + c, r, a.w, 1, a.col, a.name, a.app});
+                    placed = true;
+                }
+        }
+    }
     int m = 0;
     for (int i = 0; i < (int)gTiles.size(); i++) { SDL_Rect r = tileBase(i); m = std::max(m, r.x + r.w); }
     maxScroll = std::max(0.0f, (float)(m + 90 - W));
@@ -286,6 +354,9 @@ static Col appBg(int app) {
         case A_PHOTOS: return Col{0, 0, 0};
         case A_WORD: return Col{43, 87, 154};
         case A_EXCEL: return Col{33, 115, 70};
+        case A_STORE: return Col{0, 140, 0};
+        case A_BROWSER: return Col{219, 68, 55};
+        case A_PAINT: return Col{58, 58, 64};
         default: break;
     }
     for (auto& t : gTiles) if (t.app == app) return t.color;
@@ -294,18 +365,28 @@ static Col appBg(int app) {
 
 // ---------------------------------------------------------------- settings persistence
 static void saveCfg() {
-    unsigned char b[8] = {0xA7, (unsigned char)gTheme, (unsigned char)gBurn, (unsigned char)g24,
-                          (unsigned char)gInstalled[0], (unsigned char)gInstalled[1], (unsigned char)gDocFont, (unsigned char)gBold};
-    writeFile(DIR_ + "settings.cfg", std::string((const char*)b, 8));
+    std::string b;
+    b += (char)0xA8; b += (char)gTheme; b += (char)gBurn; b += (char)g24;
+    b += (char)gDocFont; b += (char)gBold; b += (char)gEngine;
+    for (int a = 0; a < A_COUNT; a++) b += (char)gInst[a];
+    writeFile(DIR_ + "settings.cfg", b);
 }
 static void loadCfg() {
     std::string s;
-    if (!readFile(DIR_ + "settings.cfg", s) || s.size() < 4 || (unsigned char)s[0] != 0xA7) return;
-    gTheme = (unsigned char)s[1] % 4; gBurn = s[2] != 0; g24 = s[3] != 0;
-    if (s.size() >= 8) {
-        gInstalled[0] = s[4] != 0; gInstalled[1] = s[5] != 0;
-        gDocFont = std::min(F44, std::max(F16, (int)(unsigned char)s[6]));
-        gBold = s[7] != 0;
+    if (!readFile(DIR_ + "settings.cfg", s) || s.size() < 4) return;
+    unsigned char m = (unsigned char)s[0];
+    if (m == 0xA7) { // v0.2 format
+        gTheme = (unsigned char)s[1] % 4; gBurn = s[2] != 0; g24 = s[3] != 0;
+        if (s.size() >= 8) {
+            gInst[A_WORD] = s[4] != 0; gInst[A_EXCEL] = s[5] != 0;
+            gDocFont = std::min(F44, std::max(F16, (int)(unsigned char)s[6]));
+            gBold = s[7] != 0;
+        }
+    } else if (m == 0xA8 && s.size() >= 7) {
+        gTheme = (unsigned char)s[1] % 4; gBurn = s[2] != 0; g24 = s[3] != 0;
+        gDocFont = std::min(F44, std::max(F16, (int)(unsigned char)s[4]));
+        gBold = s[5] != 0; gEngine = (unsigned char)s[6] % 3;
+        for (int a = 0; a < A_COUNT && 7 + a < (int)s.size(); a++) gInst[a] = s[7 + a] != 0;
     }
 }
 static void loadUser() {
@@ -561,7 +642,13 @@ static void csvToSheet(const std::string& d) {
 }
 static int xVisRows() { int bottom = 0; (void)bottom; return 1; }
 static bool kbOpen = false;
-static int kbTarget = 0; // 1 notes, 2 word, 3 excel cell
+static std::string gUrl, storeSearch;
+static void browserGo();
+static void wType(const std::string& t);
+static void wBack();
+static void appTouch(int phase, int x, int y);
+static void appUpdate(float dt);
+static int kbTarget = 0; // 1 notes, 2 word, 3 excel cell, 4 browser address, 5 store search
 static bool kbShift = false, kbSym = false;
 static int xRows() { int bottom = kbOpen ? KBTOP : UIH; return std::max(1, (bottom - XTOP) / XROWH); }
 static void xEnsureVisible() {
@@ -608,13 +695,17 @@ static int kbHit(int x, int y) {
 }
 static void kbType(const std::string& s) {
     if (kbTarget == 1) { gNote.s += s; gNote.dirty = true; gNote.follow = true; }
-    else if (kbTarget == 2) { gDoc.s += s; gDoc.dirty = true; gDoc.follow = true; }
+    else if (kbTarget == 2) wType(s);
     else if (kbTarget == 3) { if (!xEditing) { xEdit.clear(); xEditing = true; } xEdit += s; }
+    else if (kbTarget == 4) gUrl += s;
+    else if (kbTarget == 5) storeSearch += s;
 }
 static void kbBackspace() {
     if (kbTarget == 1) { if (!gNote.s.empty()) { gNote.s.pop_back(); gNote.dirty = true; gNote.follow = true; } }
-    else if (kbTarget == 2) { if (!gDoc.s.empty()) { gDoc.s.pop_back(); gDoc.dirty = true; gDoc.follow = true; } }
+    else if (kbTarget == 2) wBack();
     else if (kbTarget == 3) { startEdit(); if (!xEdit.empty()) xEdit.pop_back(); }
+    else if (kbTarget == 4) { if (!gUrl.empty()) gUrl.pop_back(); }
+    else if (kbTarget == 5) { if (!storeSearch.empty()) storeSearch.pop_back(); }
 }
 static void openKb(int target) { kbOpen = true; kbTarget = target; kbShift = false; kbSym = false; }
 static void hideKb() { if (kbTarget == 3) commitCell(); kbOpen = false; }
@@ -624,6 +715,8 @@ static void kbAction(const std::string& a) {
     else if (a == "BS") kbBackspace();
     else if (a == "ENTER") {
         if (kbTarget == 3) { commitCell(); xr = std::min(xr + 1, XR - 1); xEnsureVisible(); }
+        else if (kbTarget == 4) browserGo();
+        else if (kbTarget == 5) hideKb();
         else kbType("\n");
     }
     else if (a == "HIDE") hideKb();
@@ -757,19 +850,251 @@ static void calcPress(const std::string& b) {
 }
 
 // ---------------------------------------------------------------- store
-static float storeProg[2] = {0, 0};
+static float storeProg[A_COUNT];
 
+// ---------------------------------------------------------------- store / browser state
+static int storeView = 0, storeSel = 0, storeCat = -1, storeScroll = 0;
+static Uint32 storeStart = 0;
+static std::vector<std::string> gHist;
+static std::string brMsg;
+static Uint32 brMsgT = 0;
+static void loadHist() {
+    gHist.clear();
+    std::string d;
+    if (!readFile(DIR_ + "history.txt", d)) return;
+    std::string line;
+    for (char c : d) { if (c == '\n') { if (!line.empty()) gHist.push_back(line); line.clear(); } else line += c; }
+    if (!line.empty()) gHist.push_back(line);
+}
+static void saveHist() {
+    std::string d;
+    for (auto& h : gHist) d += h + "\n";
+    writeFile(DIR_ + "history.txt", d);
+}
+
+
+// ---------------------------------------------------------------- Paint (state + pixel engine)
+static const int PCX = 20, PCY = 170, PCW = 1240, PCH = 488; // canvas rectangle on screen
+static std::vector<Uint32> pPix, pBase;
+static std::vector<std::vector<Uint32>> pUndo;
+static SDL_Texture* pTex = nullptr;
+static bool pTexDirty = true, pDirty = false, pDown = false;
+static int pTool = 0, pSizeIdx = 2, pCol = 0, pSX = 0, pSY = 0, pLX = 0, pLY = 0;
+static const int PSIZES[6] = {2, 4, 8, 14, 22, 32};
+static std::string pMsg;
+static Uint32 pMsgT = 0;
+static const Col PAL[16] = {{0, 0, 0}, {90, 90, 90}, {170, 170, 170}, {255, 255, 255}, {200, 30, 30}, {240, 120, 20}, {250, 210, 30}, {130, 200, 40},
+                            {20, 150, 60}, {20, 180, 190}, {40, 110, 220}, {40, 50, 150}, {130, 60, 190}, {230, 80, 170}, {130, 80, 40}, {250, 190, 150}};
+static Uint32 packCol(Col c) { return 0xFF000000u | ((Uint32)c.r << 16) | ((Uint32)c.g << 8) | c.b; }
+static void pSet(int x, int y, Uint32 v) { if (x >= 0 && y >= 0 && x < PCW && y < PCH) pPix[(size_t)y * PCW + x] = v; }
+static void pDisc(int cx, int cy, int r, Uint32 v) {
+    for (int dy = -r; dy <= r; dy++) {
+        int w = (int)sqrtf((float)(r * r - dy * dy));
+        for (int x = cx - w; x <= cx + w; x++) pSet(x, cy + dy, v);
+    }
+}
+static void pLine(int x0, int y0, int x1, int y1, int r, Uint32 v) {
+    int n = std::max(abs(x1 - x0), abs(y1 - y0));
+    if (n == 0) { pDisc(x0, y0, r, v); return; }
+    int step = r > 6 ? std::max(1, r / 4) : 1;
+    for (int i = 0; i <= n; i += step) pDisc(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, r, v);
+    pDisc(x1, y1, r, v);
+}
+static void pRectO(int x0, int y0, int x1, int y1, int r, Uint32 v) {
+    pLine(x0, y0, x1, y0, r, v); pLine(x1, y0, x1, y1, r, v); pLine(x1, y1, x0, y1, r, v); pLine(x0, y1, x0, y0, r, v);
+}
+static void pOval(int x0, int y0, int x1, int y1, int r, Uint32 v) {
+    float cx = (x0 + x1) / 2.0f, cy = (y0 + y1) / 2.0f, rx = fabsf((x1 - x0) / 2.0f), ry = fabsf((y1 - y0) / 2.0f);
+    int px = (int)(cx + rx), py = (int)cy;
+    for (int i = 1; i <= 96; i++) {
+        float a = i * 6.2831853f / 96.0f;
+        int nx = (int)(cx + cosf(a) * rx), ny = (int)(cy + sinf(a) * ry);
+        pLine(px, py, nx, ny, r, v); px = nx; py = ny;
+    }
+}
+static void pFill(int x, int y, Uint32 nv) {
+    if (x < 0 || y < 0 || x >= PCW || y >= PCH) return;
+    Uint32 old = pPix[(size_t)y * PCW + x];
+    if (old == nv) return;
+    std::vector<int> st; st.push_back(y * PCW + x);
+    while (!st.empty()) {
+        int i = st.back(); st.pop_back();
+        int px = i % PCW, py = i / PCW;
+        if (pPix[i] != old) continue;
+        int l = px, r = px;
+        while (l > 0 && pPix[(size_t)py * PCW + l - 1] == old) l--;
+        while (r < PCW - 1 && pPix[(size_t)py * PCW + r + 1] == old) r++;
+        for (int k = l; k <= r; k++) pPix[(size_t)py * PCW + k] = nv;
+        for (int dy = -1; dy <= 1; dy += 2) {
+            int ny = py + dy;
+            if (ny < 0 || ny >= PCH) continue;
+            bool run = false;
+            for (int k = l; k <= r; k++) {
+                bool m = pPix[(size_t)ny * PCW + k] == old;
+                if (m && !run) st.push_back(ny * PCW + k);
+                run = m;
+            }
+        }
+    }
+}
+static void paintEnsure() { if (pPix.empty()) pPix.assign((size_t)PCW * PCH, 0xFFFFFFFFu); }
+static void paintPush() {
+    paintEnsure();
+    pUndo.push_back(pPix);
+    if (pUndo.size() > 8) pUndo.erase(pUndo.begin());
+}
+static void paintSaveFile(const std::string& path) {
+    if (pPix.empty()) return;
+    SDL_Surface* sf = SDL_CreateRGBSurfaceFrom(pPix.data(), PCW, PCH, 32, PCW * 4, 0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
+    if (sf) { SDL_SaveBMP(sf, path.c_str()); SDL_FreeSurface(sf); }
+}
+static void paintLoad() {
+    pPix.assign((size_t)PCW * PCH, 0xFFFFFFFFu);
+    pUndo.clear(); pTexDirty = true; pDirty = false; pDown = false;
+    SDL_Surface* sf = IMG_Load((DIR_ + "paint.bmp").c_str());
+    if (!sf) return;
+    SDL_Surface* c = SDL_ConvertSurfaceFormat(sf, SDL_PIXELFORMAT_ARGB8888, 0);
+    if (c) {
+        if (c->w == PCW && c->h == PCH) for (int y = 0; y < PCH; y++) memcpy(&pPix[(size_t)y * PCW], (Uint8*)c->pixels + (size_t)y * c->pitch, PCW * 4);
+        SDL_FreeSurface(c);
+    }
+    SDL_FreeSurface(sf);
+}
+static void paintFree() {
+    if (pTex) { SDL_DestroyTexture(pTex); pTex = nullptr; }
+    pPix.clear(); pBase.clear(); pUndo.clear();
+}
+static void paintExport() {
+    mkdir((DIR_ + "photos").c_str(), 0777);
+    char nm[64]; snprintf(nm, sizeof nm, "paint_%04d%02d%02d_%02d%02d%02d.bmp", gNow.y, gNow.mo, gNow.d, gNow.h, gNow.mi, gNow.s);
+    paintSaveFile(DIR_ + "photos/" + nm);
+    pMsg = std::string("Saved: switch/WinNX/photos/") + nm; pMsgT = SDL_GetTicks();
+}
+
+// ---------------------------------------------------------------- Word (document model)
+struct WPara {
+    std::string t;
+    int style = 0;          // 0 normal, 1 heading 1, 2 heading 2, 3 divider line, 4 picture
+    bool b = false, i = false, u = false;
+    int align = 0;          // 0 left, 1 centre, 2 right
+    int list = 0;           // 0 none, 1 bullets, 2 numbers
+    std::string img;        // picture path (style 4)
+    std::vector<std::string> lines; std::string cs; int cf = -1, cw = -1; // layout cache
+};
+static std::vector<WPara> wDoc;
+static int wCur = 0, wScroll = 0, wTab = 0, wView = 0, wPicScroll = 0;
+static bool wDirty = false, wFollow = false;
+static std::vector<std::string> wPics;
+struct WImg { SDL_Texture* t; int w, h; };
+static std::map<std::string, WImg> wImgs;
+static void wEnsure() { if (wDoc.empty()) { wDoc.push_back(WPara()); wCur = 0; } wCur = std::max(0, std::min(wCur, (int)wDoc.size() - 1)); }
+static void wFreeImgs() { for (auto& p : wImgs) if (p.second.t) SDL_DestroyTexture(p.second.t); wImgs.clear(); }
+static WImg* wImage(const std::string& path) {
+    auto it = wImgs.find(path);
+    if (it != wImgs.end()) return it->second.t ? &it->second : nullptr;
+    if (wImgs.size() >= 8) wFreeImgs();
+    WImg wi = {nullptr, 0, 0};
+    SDL_Surface* sf = IMG_Load(path.c_str());
+    if (sf) { wi.w = sf->w; wi.h = sf->h; wi.t = SDL_CreateTextureFromSurface(gR, sf); SDL_FreeSurface(sf); }
+    WImg& slot = (wImgs[path] = wi);
+    return slot.t ? &slot : nullptr;
+}
+static void wSave() {
+    std::string d;
+    for (auto& p : wDoc) {
+        char hd[64];
+        snprintf(hd, sizeof hd, "P|%d|%d|%d|%d|", p.style, (p.b ? 1 : 0) | (p.i ? 2 : 0) | (p.u ? 4 : 0), p.align, p.list);
+        d += hd; d += p.img; d += "|"; d += p.t; d += "\n";
+    }
+    writeFile(DIR_ + "document1.wdoc", d);
+}
+static void wLoad() {
+    wDoc.clear(); wCur = 0; wScroll = 0; wDirty = false; wFollow = true;
+    std::string d;
+    if (readFile(DIR_ + "document1.wdoc", d)) {
+        size_t pos = 0;
+        while (pos < d.size()) {
+            size_t e = d.find('\n', pos);
+            if (e == std::string::npos) e = d.size();
+            std::string ln = d.substr(pos, e - pos); pos = e + 1;
+            if (ln.size() < 2 || ln[0] != 'P' || ln[1] != '|') continue;
+            std::vector<std::string> f; size_t a = 2;
+            for (int k = 0; k < 5; k++) { size_t b = ln.find('|', a); if (b == std::string::npos) break; f.push_back(ln.substr(a, b - a)); a = b + 1; }
+            if (f.size() < 5) continue;
+            WPara p;
+            p.style = atoi(f[0].c_str()); int fl = atoi(f[1].c_str());
+            p.b = fl & 1; p.i = fl & 2; p.u = fl & 4;
+            p.align = atoi(f[2].c_str()); p.list = atoi(f[3].c_str()); p.img = f[4];
+            p.t = ln.substr(a);
+            wDoc.push_back(p);
+        }
+    } else if (readFile(DIR_ + "document1.txt", d)) { // v0.2 plain-text document
+        std::string cur;
+        for (char c : d) { if (c == '\n') { WPara p; p.t = cur; wDoc.push_back(p); cur.clear(); } else cur += c; }
+        WPara p; p.t = cur; wDoc.push_back(p);
+    }
+    wEnsure();
+}
+static int wWords() {
+    int n = 0;
+    for (auto& p : wDoc) if (p.style < 3) n += wordCount(p.t);
+    return n;
+}
+static void wInsertAfter(const WPara& np) {
+    wEnsure();
+    wDoc.insert(wDoc.begin() + wCur + 1, np);
+    wCur++; wDirty = true; wFollow = true;
+}
+static void wType(const std::string& t) {
+    wEnsure();
+    if (wDoc[wCur].style >= 3) { WPara np; wInsertAfter(np); }
+    WPara& p = wDoc[wCur];
+    if (t == "\n") {
+        if (p.list && p.t.empty()) { p.list = 0; wDirty = true; return; } // Enter on an empty list item ends the list
+        WPara np;
+        np.align = p.align; np.list = p.list; np.b = p.b; np.i = p.i; np.u = p.u;
+        if (p.style == 0) np.style = 0;
+        wInsertAfter(np);
+        return;
+    }
+    p.t += t; wDirty = true; wFollow = true;
+}
+static void wBack() {
+    wEnsure();
+    WPara& p = wDoc[wCur];
+    if (p.style >= 3 || p.t.empty()) {
+        if (p.list && p.style < 3) { p.list = 0; wDirty = true; return; }
+        if (wDoc.size() > 1) { wDoc.erase(wDoc.begin() + wCur); wCur = std::max(0, wCur - 1); }
+        else { p = WPara(); }
+        wDirty = true; wFollow = true;
+        return;
+    }
+    while (!p.t.empty() && ((unsigned char)p.t.back() & 0xC0) == 0x80) p.t.pop_back();
+    if (!p.t.empty()) p.t.pop_back();
+    wDirty = true; wFollow = true;
+}
+static void wScanPics() {
+    wPics.clear();
+    scanDir("sdmc:/switch/WinNX/photos", 2, false, wPics);
+    scanDir("sdmc:/Pictures", 3, false, wPics);
+    scanDir("sdmc:/Nintendo/Album", 6, false, wPics);
+    std::sort(wPics.begin(), wPics.end(), [](const std::string& a, const std::string& b) { return a > b; });
+    wPicScroll = 0;
+}
+// @@APPS_A@@
 // ---------------------------------------------------------------- autosave + app lifecycle
 static void saveAll() {
     if (gNote.dirty) { writeFile(DIR_ + "notes.txt", gNote.s); gNote.dirty = false; }
-    if (gDoc.dirty) { writeFile(DIR_ + "document1.txt", gDoc.s); gDoc.dirty = false; }
+    if (wDirty) { wSave(); wDirty = false; }
     if (xDirty) { writeFile(DIR_ + "sheet1.csv", sheetToCsv()); xDirty = false; }
+    if (pDirty && !pDown) { paintSaveFile(DIR_ + "paint.bmp"); pDirty = false; }
+    // @@SAVE@@
 }
 static void appInit(int app) {
     std::string d;
     switch (app) {
         case A_NOTES: readFile(DIR_ + "notes.txt", gNote.s); gNote.scroll = 0; gNote.follow = true; gNote.dirty = false; break;
-        case A_WORD: readFile(DIR_ + "document1.txt", gDoc.s); gDoc.scroll = 0; gDoc.follow = true; gDoc.dirty = false; break;
+        case A_WORD: wLoad(); wTab = 0; wView = 0; break;
         case A_EXCEL:
             if (readFile(DIR_ + "sheet1.csv", d)) csvToSheet(d);
             xr = xc = xScrR = xScrC = 0; xEditing = false; xDirty = false; break;
@@ -783,6 +1108,10 @@ static void appInit(int app) {
             loadPhoto();
             break;
         case A_GAMES: scanGames(); gamesScroll = 0; break;
+        case A_STORE: storeStart = SDL_GetTicks(); storeView = 0; storeCat = -1; storeScroll = 0; storeSearch.clear(); break;
+        case A_BROWSER: loadHist(); brMsg.clear(); break;
+        case A_PAINT: paintLoad(); break;
+        // @@INIT@@
         default: break;
     }
 }
@@ -790,10 +1119,13 @@ static void appReset(int app) {
     saveAll();
     switch (app) {
         case A_NOTES: gNote.s.clear(); break;
-        case A_WORD: gDoc.s.clear(); break;
+        case A_WORD: wDoc.clear(); wFreeImgs(); break;
         case A_EXCEL: for (int r = 0; r < XR; r++) for (int c = 0; c < XC; c++) xs[r][c].clear(); break;
         case A_PHOTOS: if (phTex) { SDL_DestroyTexture(phTex); phTex = nullptr; } gPhotos.clear(); break;
         case A_GAMES: gGames.clear(); break;
+        case A_STORE: storeView = 0; break;
+        case A_PAINT: paintFree(); break;
+        // @@RESET@@
         case A_CALC: cCur = "0"; cAcc = 0; cOp = 0; cFresh = true; cErr = false; break;
         default: break;
     }
@@ -916,6 +1248,16 @@ static void drawIcon(int app, int cx, int cy, Col bg) {
             rect(cx - 36, cy - 3, 16, 6, bg); rect(cx - 31, cy - 8, 6, 16, bg);
             disc(cx + 26, cy - 4, 3, bg); disc(cx + 34, cy + 4, 3, bg);
             break;
+        case A_PAINT:
+            line(cx - 26, cy + 24, cx + 20, cy - 22, 10, WHITE);
+            disc(cx - 26, cy + 24, 8, WHITE); disc(cx + 24, cy - 26, 8, bg);
+            disc(cx + 10, cy + 20, 8, WHITE); disc(cx + 26, cy + 8, 6, WHITE);
+            break;
+        case A_BROWSER:
+            ring(cx, cy, 28, 5, WHITE, bg);
+            rect(cx - 28, cy - 2, 56, 4, WHITE); rect(cx - 2, cy - 28, 4, 56, WHITE);
+            rect(cx - 22, cy - 15, 44, 3, WHITE); rect(cx - 22, cy + 12, 44, 3, WHITE);
+            break;
         case A_WORD:
             text("W", F72, cx, cy - 46, WHITE, 1);
             break;
@@ -998,6 +1340,638 @@ static std::vector<Chip> deskChips() {
     return v;
 }
 
+
+// ---------------------------------------------------------------- Store (Windows 8.1 look)
+static const Col STG = {0, 138, 0};            // store green
+static const Col GREYT = {80, 80, 80};
+static void star(int cx, int cy, int r, Col c) {
+    tri((float)cx, cy - (float)r, cx - r * 0.87f, cy + r * 0.5f, cx + r * 0.87f, cy + r * 0.5f, c);
+    tri((float)cx, cy + (float)r, cx - r * 0.87f, cy - r * 0.5f, cx + r * 0.87f, cy - r * 0.5f, c);
+}
+static void stars(int x, int y, int n) {
+    for (int i = 0; i < 5; i++) star(x + 8 + i * 18, y + 8, 8, i < n ? Col{70, 70, 70} : Col{200, 200, 200});
+}
+static void storeIcon(const SApp& a, int x, int y, int sz) {
+    rect(x, y, sz, sz, a.col);
+    std::string g = a.glyph;
+    int f = sz >= 150 ? (g.size() > 2 ? F44 : F130) : (sz >= 90 ? (g.size() > 2 ? F30 : F72) : (g.size() > 2 ? F16 : F30));
+    int fh = f == F130 ? 130 : f == F72 ? 72 : f == F44 ? 44 : f == F30 ? 30 : 16;
+    text(g, f, x + sz / 2, y + sz / 2 - (int)(fh * 0.62f), WHITE, 1);
+}
+static void drawBag(int cx, int cy) {
+    ring(cx, cy - 38, 30, 6, WHITE, STG);
+    rect(cx - 52, cy - 38, 104, 92, WHITE);
+    winLogo(cx, cy + 8, 46, STG);
+}
+static int storeFeat() { return (int)((SDL_GetTicks() / 6000) % std::max(1, NSTORE)); }
+static std::vector<int> storeList() {
+    std::vector<int> v;
+    std::string q = lower(storeSearch);
+    for (int i = 0; i < NSTORE; i++) {
+        if (storeCat >= 0 && std::string(STORE[i].cat) != CATS[storeCat]) continue;
+        if (!q.empty() && lower(STORE[i].name).find(q) == std::string::npos) continue;
+        v.push_back(i);
+    }
+    return v;
+}
+static const int ST_LIST_X = 660, ST_LIST_Y = 206, ST_ROW = 84;
+static SDL_Rect storeChip(int i) { // i = 0 "All", 1.. categories
+    int x = ST_LIST_X;
+    for (int k = 0; k < i; k++) x += tw(k == 0 ? "All" : CATS[k - 1], F16) + 28 + 6;
+    SDL_Rect r = {x, 150, tw(i == 0 ? "All" : CATS[i - 1], F16) + 28, 38};
+    return r;
+}
+static void storeAct(int idx) {
+    const SApp& a = STORE[idx];
+    if (storeProg[a.app] > 0) return;
+    if (gInst[a.app]) { pendingTile = tileIndexFor(a.app); closeApp(false); }
+    else storeProg[a.app] = 0.001f;
+}
+static void storeUninstall(int idx) {
+    const SApp& a = STORE[idx];
+    if (!gInst[a.app]) return;
+    if (running[a.app]) appReset(a.app);
+    gInst[a.app] = false; rebuildTiles(); saveCfg();
+}
+static void drawStoreBtn(int x, int y, int w, int idx, const Theme& th, bool primary) {
+    const SApp& a = STORE[idx];
+    if (storeProg[a.app] > 0) {
+        rect(x, y + 16, w, 14, Col{210, 210, 210});
+        rect(x, y + 16, (int)(w * storeProg[a.app]), 14, STG);
+        text("Installing...", F16, x, y - 8, GREYT);
+    } else if (primary) {
+        btn(x, y, w, 52, gInst[a.app] ? "Open" : "Install", STG, WHITE);
+    }
+    (void)th;
+}
+static void drawStore(const Theme& th, int bottom) {
+    float st = (SDL_GetTicks() - storeStart) / 1000.0f;
+    if (st < 1.4f) { // splash screen
+        rect(0, 0, W, UIH, Col{0, 140, 0});
+        drawBag(W / 2, UIH / 2 - 40);
+        for (int k = 0; k < 8; k++) {
+            float ang = st * 6.0f - k * 0.38f;
+            disc(W / 2 + (int)(sinf(ang) * 22), UIH / 2 + 110 - (int)(cosf(ang) * 22), 4 - k / 3, WHITE, 255 - k * 28);
+        }
+        return;
+    }
+    rect(0, 0, W, UIH, Col{243, 243, 243});
+    tri(560, 0, 720, 0, 620, 92, Col{120, 190, 70});
+    tri(560, 0, 620, 92, 520, 0, Col{40, 150, 40}, 160);
+    // diagonal light wedge in the background
+    tri(0, UIH, 340, UIH, 0, UIH - 250, Col{255, 255, 255}, 120);
+    if (storeView == 1) { // ---------------- detail page
+        const SApp& a = STORE[storeSel];
+        ring(60, 70, 26, 3, GREYT, Col{243, 243, 243});
+        line(70, 70, 50, 70, 3, GREYT); line(50, 70, 58, 62, 3, GREYT); line(50, 70, 58, 78, 3, GREYT);
+        text("Store", F44, 118, 46, GREYT);
+        storeIcon(a, 70, 150, 220);
+        text(a.name, F44, 320, 146, Col{50, 50, 50});
+        text(a.cat, F22, 320, 202, STG);
+        stars(320, 238, a.stars);
+        text(std::string("(") + a.rate + " ratings)", F16, 320 + 100, 240, GREYT);
+        text("Free", F22, 320, 272, GREYT);
+        drawStoreBtn(320, 318, 220, storeSel, th, true);
+        if (storeProg[a.app] <= 0 && gInst[a.app]) btn(560, 318, 220, 52, "Uninstall", Col{110, 110, 110}, WHITE);
+        text("Description", F30, 70, 410, Col{50, 50, 50});
+        text(a.d1, F22, 70, 456, Col{60, 60, 60});
+        int y = 494;
+        for (auto& l : wrapText(a.d2, F22, 1100)) { text(l, F22, 70, y, GREYT); y += 30; }
+        return;
+    }
+    // ---------------- home page
+    text("Store", F72, 76, 24, Col{70, 70, 70});
+    rect(900, 56, 310, 42, WHITE);
+    outline(900, 56, 310, 42, 2, Col{150, 150, 150});
+    if (storeSearch.empty() && !(kbOpen && kbTarget == 5)) text("Search for apps", F22, 912, 64, Col{150, 150, 150});
+    else text(storeSearch + ((kbOpen && kbTarget == 5 && (SDL_GetTicks() / 500) % 2 == 0) ? "|" : ""), F22, 912, 64, DARK);
+    ring(1190, 75, 9, 3, GREYT, WHITE); line(1196, 82, 1203, 90, 3, GREYT);
+
+    std::vector<int> L = storeList();
+    int f = storeFeat();
+    const SApp& fa = STORE[f];
+    // featured banner
+    rect(70, 130, 560, 240, fa.col);
+    tri(70, 370, 350, 130, 70, 130, Col{255, 255, 255}, 28);
+    tri(630, 130, 630, 370, 430, 370, Col{0, 0, 0}, 40);
+    text(fa.name, F44, 96, 150, WHITE);
+    text(fa.cat, F22, 96, 204, WHITE, 0, 210);
+    text(fa.glyph, std::string(fa.glyph).size() > 2 ? F72 : F130, 560, 160, WHITE, 2, 90);
+    for (int i = 0; i < NSTORE; i++) rect(96 + i * 18, 346, 12, 5, WHITE, i == f ? 255 : 90);
+    // info card under the banner
+    rect(92, 384, 120, 120, WHITE);
+    storeIcon(fa, 98, 390, 108);
+    text(fa.name, F30, 232, 392, STG);
+    text(fa.cat, F22, 232, 432, GREYT);
+    stars(232, 466, fa.stars);
+    int yy = 500;
+    for (auto& l : wrapText(fa.d1, F16, 390)) { text(l, F16, 232, yy, GREYT); yy += 22; }
+    drawStoreBtn(232, 580, 200, f, th, true);
+
+    // right: category chips + list
+    text(storeSearch.empty() ? "Top free apps" : "Results", F30, ST_LIST_X, 106, Col{70, 70, 70});
+    for (int i = 0; i < 6; i++) {
+        SDL_Rect r = storeChip(i);
+        bool on = (storeCat == i - 1);
+        rect(r.x, r.y, r.w, r.h, on ? STG : Col{222, 222, 222});
+        text(i == 0 ? "All" : CATS[i - 1], F16, r.x + r.w / 2, r.y + 8, on ? WHITE : Col{60, 60, 60}, 1);
+    }
+    int n = (int)L.size();
+    int maxS = std::max(0, n * ST_ROW - (bottom - ST_LIST_Y));
+    storeScroll = std::max(0, std::min(storeScroll, maxS));
+    SDL_Rect clip = {ST_LIST_X - 10, ST_LIST_Y, W - ST_LIST_X + 10, std::max(1, bottom - ST_LIST_Y)};
+    SDL_RenderSetClipRect(gR, &clip);
+    for (int i = 0; i < n; i++) {
+        int y = ST_LIST_Y + i * ST_ROW - storeScroll;
+        if (y + ST_ROW < ST_LIST_Y || y > bottom) continue;
+        const SApp& a = STORE[L[i]];
+        storeIcon(a, ST_LIST_X, y + 6, 64);
+        text(a.name, F22, ST_LIST_X + 82, y + 4, Col{40, 40, 40});
+        text("Free", F16, ST_LIST_X + 82, y + 36, GREYT);
+        stars(ST_LIST_X + 130, y + 33, a.stars);
+        text(a.cat, F16, ST_LIST_X + 82, y + 58, Col{140, 140, 140});
+        if (storeProg[a.app] > 0) {
+            rect(W - 190, y + 30, 150, 10, Col{210, 210, 210});
+            rect(W - 190, y + 30, (int)(150 * storeProg[a.app]), 10, STG);
+        } else if (gInst[a.app]) text("Installed", F16, W - 40, y + 26, STG, 2);
+    }
+    SDL_RenderSetClipRect(gR, nullptr);
+    if (n == 0) text("No apps found", F30, ST_LIST_X, ST_LIST_Y + 20, GREYT);
+}
+static void storeTap(int x, int y) {
+    if (SDL_GetTicks() - storeStart < 1400) return;
+    if (storeView == 1) {
+        const SApp& a = STORE[storeSel];
+        if ((x - 60) * (x - 60) + (y - 70) * (y - 70) < 40 * 40) { storeView = 0; return; }
+        if (inR(x, y, 320, 318, 220, 52)) storeAct(storeSel);
+        else if (inR(x, y, 560, 318, 220, 52) && gInst[a.app] && storeProg[a.app] <= 0) storeUninstall(storeSel);
+        return;
+    }
+    if (kbOpen && kbTarget == 5 && !inR(x, y, 900, 56, 310, 42)) hideKb();
+    if (inR(x, y, 900, 56, 310, 42)) { openKb(5); return; }
+    for (int i = 0; i < 6; i++) {
+        SDL_Rect r = storeChip(i);
+        if (inR(x, y, r.x, r.y, r.w, r.h)) { storeCat = i - 1; storeScroll = 0; return; }
+    }
+    int f = storeFeat();
+    if (inR(x, y, 232, 580, 200, 52)) { storeAct(f); return; }
+    if (inR(x, y, 70, 130, 560, 240) || inR(x, y, 92, 384, 520, 190)) { storeSel = f; storeView = 1; hideKb(); return; }
+    if (x >= ST_LIST_X - 10 && y >= ST_LIST_Y && y < areaBottom()) {
+        std::vector<int> L = storeList();
+        int i = (y - ST_LIST_Y + storeScroll) / ST_ROW;
+        if (i >= 0 && i < (int)L.size()) { storeSel = L[i]; storeView = 1; hideKb(); }
+    }
+}
+
+// ---------------------------------------------------------------- CMrhoe (Amir's browser)
+struct Bm { const char* name; const char* url; Col c; };
+static const Bm BMS[8] = {
+    {"DuckDuckGo", "https://duckduckgo.com", {222, 88, 51}},
+    {"Google", "https://www.google.com", {66, 133, 244}},
+    {"Wikipedia", "https://en.wikipedia.org", {90, 90, 100}},
+    {"YouTube", "https://m.youtube.com", {204, 24, 30}},
+    {"Reddit", "https://old.reddit.com", {255, 87, 34}},
+    {"GitHub", "https://github.com", {36, 41, 46}},
+    {"Nintendo", "https://www.nintendo.com", {230, 0, 18}},
+    {"News", "https://news.google.com", {20, 130, 120}},
+};
+static const char* ENG_NAME[3] = {"DDG", "Google", "Bing"};
+static const char* ENG_URL[3] = {"https://duckduckgo.com/?q=", "https://www.google.com/search?q=", "https://www.bing.com/search?q="};
+static std::string urlEncode(const std::string& in) {
+    std::string o; char b[8];
+    for (unsigned char c : in) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o += (char)c;
+        else if (c == ' ') o += '+';
+        else { snprintf(b, sizeof b, "%%%02X", c); o += b; }
+    }
+    return o;
+}
+static std::string buildUrl(std::string in) {
+    while (!in.empty() && in.back() == ' ') in.pop_back();
+    size_t st = in.find_first_not_of(' ');
+    if (st == std::string::npos) return "";
+    in = in.substr(st);
+    std::string l = lower(in);
+    if (l.rfind("http://", 0) == 0 || l.rfind("https://", 0) == 0) return in;
+    if (in.find(' ') == std::string::npos && in.find('.') != std::string::npos) return "https://" + in;
+    return std::string(ENG_URL[gEngine]) + urlEncode(in);
+}
+static void openUrl(const std::string& url) {
+    gHist.erase(std::remove(gHist.begin(), gHist.end(), url), gHist.end());
+    gHist.insert(gHist.begin(), url);
+    if (gHist.size() > 12) gHist.resize(12);
+    saveHist();
+    saveAll();
+    Result rc;
+    if (appletGetAppletType() == AppletType_Application) {
+        WebCommonConfig cfg;
+        rc = webPageCreate(&cfg, url.c_str());
+        if (R_SUCCEEDED(rc)) { webConfigSetWhitelist(&cfg, "^http*"); rc = webConfigShow(&cfg, NULL); }
+    } else {
+        WebWifiConfig cfg;
+        Uuid u; memset(&u, 0, sizeof u);
+        webWifiCreate(&cfg, NULL, url.c_str(), u, 0);
+        WebWifiReturnValue out;
+        rc = webWifiShow(&cfg, &out);
+    }
+    if (R_FAILED(rc)) {
+        char b[96]; snprintf(b, sizeof b, "Couldn't open the page (error 0x%X). Check Wi-Fi.", (unsigned)rc);
+        brMsg = b; brMsgT = SDL_GetTicks();
+    }
+}
+static void browserGo() {
+    std::string u = buildUrl(gUrl);
+    if (u.empty()) return;
+    hideKb();
+    openUrl(u);
+}
+static void drawBrowser(int bottom) {
+    (void)bottom;
+    Col red = {219, 68, 55};
+    rect(0, 0, W, UIH, Col{244, 244, 246});
+    rect(0, 0, W, 90, red);
+    ring(62, 50, 20, 4, WHITE, red);
+    rect(42, 48, 40, 3, WHITE); rect(61, 30, 3, 40, WHITE);
+    text("CMrhoe", F44, 96, 22, WHITE);
+    text("Amir's browser", F16, 290, 44, WHITE, 0, 200);
+    // address bar
+    rect(70, 112, 920, 58, WHITE);
+    outline(70, 112, 920, 58, 2, kbOpen && kbTarget == 4 ? red : Col{170, 170, 170});
+    if (gUrl.empty() && !(kbOpen && kbTarget == 4)) text("Search or enter address", F30, 88, 124, Col{150, 150, 150});
+    else {
+        std::string t = gUrl;
+        while (tw(t, F30) > 880 && t.size() > 1) t.erase(0, 1);
+        text(t + ((kbOpen && kbTarget == 4 && (SDL_GetTicks() / 500) % 2 == 0) ? "|" : ""), F30, 88, 124, DARK);
+    }
+    btn(1000, 112, 90, 58, "Go", red, WHITE);
+    btn(1100, 112, 110, 58, ENG_NAME[gEngine], Col{90, 90, 100}, WHITE);
+    if (!brMsg.empty()) {
+        if (SDL_GetTicks() - brMsgT > 6000) brMsg.clear();
+        else text(brMsg, F22, 70, 180, Col{190, 40, 30});
+    }
+    text("Bookmarks", F30, 70, 214, Col{60, 60, 60});
+    for (int i = 0; i < 8; i++) {
+        int x = 70 + (i % 4) * 290, y = 260 + (i / 4) * 124;
+        rect(x, y, 270, 108, BMS[i].c);
+        text(BMS[i].name, F30, x + 16, y + 62, WHITE);
+        text(std::string(BMS[i].name).substr(0, 1), F44, x + 16, y + 8, WHITE, 0, 200);
+    }
+    text("Recent", F30, 70, 512, Col{60, 60, 60});
+    int n = std::min<int>(3, gHist.size());
+    for (int i = 0; i < n; i++) {
+        std::string h = gHist[i];
+        while (tw(h, F22) > 1100 && h.size() > 4) h.pop_back();
+        rect(70, 556 + i * 34, 1140, 30, WHITE);
+        text(h, F22, 82, 558 + i * 34, Col{50, 90, 160});
+    }
+    if (n == 0) text("Pages you open will show up here.", F22, 70, 558, Col{130, 130, 130});
+}
+static void browserTap(int x, int y) {
+    if (kbOpen && kbTarget == 4 && y < KBTOP && !inR(x, y, 70, 112, 920, 58)) {
+        if (inR(x, y, 1000, 112, 90, 58)) { browserGo(); return; }
+        hideKb();
+    }
+    if (inR(x, y, 70, 112, 920, 58)) { openKb(4); return; }
+    if (inR(x, y, 1000, 112, 90, 58)) { browserGo(); return; }
+    if (inR(x, y, 1100, 112, 110, 58)) { gEngine = (gEngine + 1) % 3; saveCfg(); return; }
+    for (int i = 0; i < 8; i++) {
+        int bx = 70 + (i % 4) * 290, by = 260 + (i / 4) * 124;
+        if (inR(x, y, bx, by, 270, 108)) { openUrl(BMS[i].url); return; }
+    }
+    int n = std::min<int>(3, gHist.size());
+    for (int i = 0; i < n; i++)
+        if (inR(x, y, 70, 556 + i * 34, 1140, 30)) { std::string u = gHist[i]; openUrl(u); return; }
+}
+
+
+// ---------------------------------------------------------------- Paint (UI)
+static void paintShape(int x0, int y0, int x1, int y1) {
+    Uint32 v = packCol(PAL[pCol]);
+    int r = std::max(1, PSIZES[pSizeIdx] / 2);
+    if (pTool == 3) pLine(x0, y0, x1, y1, r, v);
+    else if (pTool == 4) pRectO(x0, y0, x1, y1, r, v);
+    else if (pTool == 5) pOval(x0, y0, x1, y1, r, v);
+}
+static void paintTouch(int ph, int x, int y) {
+    paintEnsure();
+    int cx = std::max(0, std::min(PCW - 1, x - PCX)), cy = std::max(0, std::min(PCH - 1, y - PCY));
+    Uint32 v = packCol(PAL[pCol]), white = 0xFFFFFFFFu;
+    int r = std::max(1, PSIZES[pSizeIdx] / 2);
+    if (ph == 0) {
+        if (!inR(x, y, PCX, PCY, PCW, PCH)) { pDown = false; return; }
+        paintPush();
+        pDown = true; pSX = pLX = cx; pSY = pLY = cy;
+        if (pTool == 0) pDisc(cx, cy, r, v);
+        else if (pTool == 1) pDisc(cx, cy, r + 3, white);
+        else if (pTool == 2) { pFill(cx, cy, v); pDown = false; }
+        else pBase = pPix;
+        pTexDirty = pDirty = true;
+    } else if (ph == 1 && pDown) {
+        if (pTool == 0) pLine(pLX, pLY, cx, cy, r, v);
+        else if (pTool == 1) pLine(pLX, pLY, cx, cy, r + 3, white);
+        else if (pTool >= 3) { pPix = pBase; paintShape(pSX, pSY, cx, cy); }
+        pLX = cx; pLY = cy; pTexDirty = pDirty = true;
+    } else if (ph == 2 && pDown) {
+        if (pTool >= 3) { pPix = pBase; paintShape(pSX, pSY, cx, cy); pTexDirty = pDirty = true; }
+        pDown = false;
+    }
+}
+static void paintTap(int x, int y) {
+    paintEnsure();
+    if (inR(x, y, PCX, PCY, PCW, PCH)) return;
+    for (int i = 0; i < 6; i++) if (inR(x, y, 20 + i * 104, 48, 100, 56)) { pTool = i; return; }
+    if (inR(x, y, 660, 48, 50, 56)) { pSizeIdx = std::max(0, pSizeIdx - 1); return; }
+    if (inR(x, y, 774, 48, 50, 56)) { pSizeIdx = std::min(5, pSizeIdx + 1); return; }
+    if (inR(x, y, 840, 48, 100, 56)) { if (!pUndo.empty()) { pPix = pUndo.back(); pUndo.pop_back(); pTexDirty = pDirty = true; } return; }
+    if (inR(x, y, 950, 48, 100, 56)) { paintPush(); std::fill(pPix.begin(), pPix.end(), 0xFFFFFFFFu); pTexDirty = pDirty = true; return; }
+    if (inR(x, y, 1060, 48, 100, 56)) { paintExport(); return; }
+    for (int i = 0; i < 16; i++) if (inR(x, y, 20 + i * 77, 110, 72, 52)) { pCol = i; if (pTool == 1) pTool = 0; return; }
+}
+static void drawPaint() {
+    paintEnsure();
+    rect(0, 0, W, UIH, Col{58, 58, 64});
+    static const char* TN[6] = {"Brush", "Eraser", "Fill", "Line", "Rect", "Oval"};
+    for (int i = 0; i < 6; i++) btn(20 + i * 104, 48, 100, 56, TN[i], pTool == i ? WHITE : Col{86, 86, 94}, pTool == i ? Col{40, 40, 44} : WHITE);
+    btn(660, 48, 50, 56, "-", Col{86, 86, 94}, WHITE);
+    rect(714, 48, 56, 56, Col{40, 40, 44});
+    text(std::to_string(PSIZES[pSizeIdx]), F22, 742, 62, WHITE, 1);
+    btn(774, 48, 50, 56, "+", Col{86, 86, 94}, WHITE);
+    btn(840, 48, 100, 56, "Undo", pUndo.empty() ? Col{70, 70, 76} : Col{86, 86, 94}, WHITE);
+    btn(950, 48, 100, 56, "Clear", Col{150, 50, 55}, WHITE);
+    btn(1060, 48, 100, 56, "Save", Col{200, 70, 160}, WHITE);
+    for (int i = 0; i < 16; i++) {
+        rect(20 + i * 77, 110, 72, 52, PAL[i]);
+        if (i == pCol) { outline(20 + i * 77 - 3, 107, 78, 58, 3, WHITE); }
+    }
+    if (!pTex) pTex = SDL_CreateTexture(gR, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, PCW, PCH);
+    if (pTex && pTexDirty) { SDL_UpdateTexture(pTex, nullptr, pPix.data(), PCW * 4); pTexDirty = false; }
+    if (pTex) { SDL_Rect d = {PCX, PCY, PCW, PCH}; SDL_RenderCopy(gR, pTex, nullptr, &d); }
+    outline(PCX - 2, PCY - 2, PCW + 4, PCH + 4, 2, Col{20, 20, 24});
+    if (!pMsg.empty()) {
+        if (SDL_GetTicks() - pMsgT > 3500) pMsg.clear();
+        else { int w = tw(pMsg, F22) + 40; rect(W / 2 - w / 2, UIH - 70, w, 46, Col{20, 20, 24}, 230); text(pMsg, F22, W / 2, UIH - 59, WHITE, 1); }
+    }
+}
+
+// ---------------------------------------------------------------- Word (UI)
+struct WB { int id, x, w; const char* l; };
+static std::vector<WB> wRibbon() {
+    std::vector<WB> v;
+    if (wTab == 0) {
+        v = {{1, 20, 60, "B"}, {2, 86, 60, "I"}, {3, 152, 60, "U"}, {4, 236, 64, "A-"}, {5, 306, 64, "A+"},
+             {6, 400, 100, "Normal"}, {7, 506, 100, "Title"}, {8, 612, 100, "Head"},
+             {9, 740, 60, "Left"}, {10, 806, 60, "Mid"}, {11, 872, 60, "Right"}, {12, 960, 60, "\xE2\x80\xA2"}, {13, 1026, 60, "1."}};
+    } else if (wTab == 1) {
+        v = {{20, 20, 160, "Picture"}, {21, 190, 160, "Symbol"}, {22, 360, 160, "Date"}, {23, 530, 160, "Time"}, {24, 700, 160, "Divider"}};
+    } else {
+        v = {{30, 20, 150, "New"}, {31, 180, 150, "Save"}};
+    }
+    return v;
+}
+static const int WTOP = 154, WPX = 230, WPW = 820;
+static std::vector<int> wY, wH;
+static int wFontOf(const WPara& p) {
+    if (p.style == 1) return std::min(F72, gDocFont + 2);
+    if (p.style == 2) return std::min(F72, gDocFont + 1);
+    return gDocFont;
+}
+static const std::vector<std::string>& wLines(WPara& p, int f, int w) {
+    if (p.cf != f || p.cw != w || p.cs != p.t) {
+        int st = (p.b || p.style == 1 ? 1 : 0) | (p.i ? 2 : 0);
+        (void)st;
+        p.lines = wrapText(p.t, f, w);
+        p.cs = p.t; p.cf = f; p.cw = w;
+    }
+    return p.lines;
+}
+static void wApply(int id) {
+    wEnsure();
+    WPara& p = wDoc[wCur];
+    bool textual = p.style < 3;
+    switch (id) {
+        case 1: p.b = !p.b; break;
+        case 2: p.i = !p.i; break;
+        case 3: p.u = !p.u; break;
+        case 4: gDocFont = std::max(F16, gDocFont - 1); saveCfg(); break;
+        case 5: gDocFont = std::min(F44, gDocFont + 1); saveCfg(); break;
+        case 6: if (textual) p.style = 0; break;
+        case 7: if (textual) p.style = (p.style == 1 ? 0 : 1); break;
+        case 8: if (textual) p.style = (p.style == 2 ? 0 : 2); break;
+        case 9: p.align = 0; break;
+        case 10: p.align = 1; break;
+        case 11: p.align = 2; break;
+        case 12: if (textual) p.list = (p.list == 1 ? 0 : 1); break;
+        case 13: if (textual) p.list = (p.list == 2 ? 0 : 2); break;
+        case 20: wScanPics(); wView = 1; hideKb(); return;
+        case 21: wView = 2; hideKb(); return;
+        case 22: wType(dateStr()); openKb(2); break;
+        case 23: wType(timeStr()); openKb(2); break;
+        case 24: { WPara np; np.style = 3; wInsertAfter(np); WPara t; wInsertAfter(t); } break;
+        case 30: backupFile(DIR_ + "document1.wdoc"); wDoc.clear(); wEnsure(); wScroll = 0; break;
+        case 31: break;
+        default: break;
+    }
+    wDirty = true; wFollow = true;
+}
+static const char* SYMS[40] = {"\xC2\xA9", "\xC2\xAE", "\xE2\x84\xA2", "\xC2\xB0", "\xC2\xB1", "\xC3\x97", "\xC3\xB7", "\xE2\x82\xAC", "\xC2\xA3", "\xC2\xA5",
+    "\xC2\xA7", "\xC2\xB6", "\xE2\x80\xA2", "\xE2\x80\x93", "\xE2\x80\x94", "\xE2\x80\xA6", "\xC2\xAB", "\xC2\xBB", "\xC2\xBD", "\xC2\xBC",
+    "\xC2\xBE", "\xC2\xB2", "\xC2\xB3", "\xC2\xB5", "\xCF\x80", "\xCE\xA9", "\xCE\xB1", "\xCE\xB2", "\xE2\x89\xA4", "\xE2\x89\xA5",
+    "\xE2\x89\xA0", "\xE2\x88\x9E", "\xE2\x88\x9A", "\xE2\x86\x90", "\xE2\x86\x92", "\xE2\x86\x91", "\xE2\x86\x93", "\xE2\x9C\x93", "\xE2\x98\x85", "\xE2\x99\xA5"};
+static void drawWord(int bottom) {
+    Col blue = {43, 87, 154};
+    rect(0, 0, W, UIH, Col{225, 226, 230});
+    wEnsure();
+    // ---- document area (drawn first so the ribbon overlaps cleanly)
+    SDL_Rect clip = {0, WTOP, W, std::max(1, bottom - WTOP)};
+    rect(190, WTOP, 900, bottom - WTOP, WHITE);
+    wY.assign(wDoc.size(), 0); wH.assign(wDoc.size(), 0);
+    int y = 0, num = 0;
+    for (int i = 0; i < (int)wDoc.size(); i++) {
+        WPara& p = wDoc[i];
+        int f = wFontOf(p);
+        int lh = gFont[f] ? TTF_FontLineSkip(gFont[f]) : 30;
+        int indent = p.list ? 44 : 0;
+        int h;
+        if (p.style == 3) h = 24;
+        else if (p.style == 4) {
+            WImg* im = wImage(p.img);
+            if (im) { float sc = std::min(std::min(1.0f, (float)WPW / im->w), 320.0f / im->h); h = (int)(im->h * sc) + 8; } else h = 50;
+        } else {
+            int n = (int)wLines(p, f, WPW - indent).size();
+            h = std::max(1, n) * lh;
+        }
+        wY[i] = y; wH[i] = h; y += h + 8;
+    }
+    int total = y + 80;
+    int view = bottom - WTOP - 20;
+    int maxS = std::max(0, total - view);
+    if (wFollow) {
+        int top = wY[wCur], bot = wY[wCur] + wH[wCur];
+        if (bot - wScroll > view - 20) wScroll = bot - view + 20;
+        if (top - wScroll < 0) wScroll = top;
+        wFollow = false;
+    }
+    wScroll = std::max(0, std::min(wScroll, maxS));
+    SDL_RenderSetClipRect(gR, &clip);
+    num = 0;
+    for (int i = 0; i < (int)wDoc.size(); i++) {
+        WPara& p = wDoc[i];
+        int py = WTOP + 18 + wY[i] - wScroll;
+        if (!(p.style < 3 && p.list == 2)) num = 0;
+        if (py + wH[i] < WTOP || py > bottom) { if (p.list == 2 && p.style < 3) num++; continue; }
+        bool cur = (i == wCur);
+        if (cur) rect(WPX - 24, py - 2, 4, wH[i] + 4, Col{120, 160, 220});
+        if (p.style == 3) { rect(WPX, py + 10, WPW, 3, Col{110, 110, 110}); continue; }
+        if (p.style == 4) {
+            WImg* im = wImage(p.img);
+            if (im) {
+                float sc = std::min(std::min(1.0f, (float)WPW / im->w), 320.0f / im->h);
+                int dw = (int)(im->w * sc), dh = (int)(im->h * sc);
+                int dx = WPX + (p.align == 1 ? (WPW - dw) / 2 : (p.align == 2 ? WPW - dw : 0));
+                SDL_Rect d = {dx, py + 4, dw, dh};
+                SDL_RenderCopy(gR, im->t, nullptr, &d);
+                if (cur) outline(dx - 2, py + 2, dw + 4, dh + 4, 2, Col{120, 160, 220});
+            } else text("[picture not found]", F22, WPX, py + 8, Col{170, 60, 60});
+            continue;
+        }
+        int f = wFontOf(p);
+        int lh = gFont[f] ? TTF_FontLineSkip(gFont[f]) : 30;
+        int indent = p.list ? 44 : 0;
+        int st = (p.b || p.style == 1 ? 1 : 0) | (p.i ? 2 : 0) | (p.u ? 4 : 0);
+        Col ink = p.style == 1 ? blue : (p.style == 2 ? Col{70, 110, 170} : DARK);
+        const std::vector<std::string>& L = wLines(p, f, WPW - indent);
+        if (p.list == 1) disc(WPX + 14, py + lh / 2, 5, ink);
+        if (p.list == 2) { num++; text(std::to_string(num) + ".", f, WPX + 34, py, ink, 2); }
+        if (p.t.empty() && wDoc.size() == 1 && !p.list && p.style == 0) text("Tap here to start typing", f, WPX, py, Col{170, 170, 170});
+        for (int k = 0; k < (int)L.size(); k++) {
+            int ly = py + k * lh;
+            int x = WPX + indent, al = 0;
+            if (p.align == 1) { x = WPX + indent + (WPW - indent) / 2; al = 1; }
+            else if (p.align == 2) { x = WPX + WPW; al = 2; }
+            textS(L[k], f, x, ly, ink, st, al);
+        }
+        if (cur && kbOpen && kbTarget == 2 && ((SDL_GetTicks() / 500) % 2 == 0)) {
+            const std::string& last = L.empty() ? std::string() : L.back();
+            int lw = twS(last, f, st);
+            int ly = py + (std::max(1, (int)L.size()) - 1) * lh;
+            int cx = WPX + indent + lw + 2;
+            if (p.align == 1) cx = WPX + indent + (WPW - indent) / 2 + lw / 2 + 2;
+            else if (p.align == 2) cx = WPX + WPW + 2;
+            rect(cx, ly + 3, 2, lh - 6, ink);
+        }
+    }
+    SDL_RenderSetClipRect(gR, nullptr);
+    // ---- title bar + tabs
+    rect(0, 34, W, 56, blue);
+    text("Word 2016", F30, 20, 46, WHITE);
+    static const char* TABS[3] = {"Home", "Insert", "File"};
+    for (int i = 0; i < 3; i++) {
+        int x = 230 + i * 120;
+        if (wTab == i) { rect(x, 44, 110, 46, Col{245, 245, 247}); text(TABS[i], F22, x + 55, 54, blue, 1); }
+        else text(TABS[i], F22, x + 55, 54, WHITE, 1);
+    }
+    text(std::to_string(wWords()) + " words", F22, W - 20, 52, WHITE, 2, 210);
+    // ---- ribbon
+    rect(0, 90, W, 64, Col{245, 245, 247});
+    rect(0, 153, W, 1, Col{190, 190, 195});
+    WPara& cp = wDoc[wCur];
+    for (auto& b : wRibbon()) {
+        bool on = false;
+        switch (b.id) {
+            case 1: on = cp.b; break; case 2: on = cp.i; break; case 3: on = cp.u; break;
+            case 6: on = cp.style == 0; break; case 7: on = cp.style == 1; break; case 8: on = cp.style == 2; break;
+            case 9: on = cp.align == 0; break; case 10: on = cp.align == 1; break; case 11: on = cp.align == 2; break;
+            case 12: on = cp.list == 1; break; case 13: on = cp.list == 2; break;
+            default: break;
+        }
+        rect(b.x, 98, b.w, 48, on ? blue : Col{220, 222, 228});
+        int st = b.id == 1 ? 1 : (b.id == 2 ? 2 : (b.id == 3 ? 4 : 0));
+        textS(b.l, F22, b.x + b.w / 2, 108, on ? WHITE : DARK, st, 1);
+    }
+    if (wTab == 2) text("Autosaved to switch/WinNX/document1.wdoc", F16, 350, 112, Col{90, 90, 100});
+    if (wTab == 1) text("Pictures come from Pictures, switch/WinNX/photos and the Album", F16, 890, 112, Col{90, 90, 100}, 0, 0);
+    // ---- overlays
+    if (wView == 1) {
+        rect(0, 0, W, UIH, Col{0, 0, 0}, 170);
+        rect(140, 50, 1000, 560, Col{245, 245, 247});
+        text("Insert picture", F30, 170, 64, blue);
+        btn(980, 58, 130, 44, "Cancel", Col{150, 150, 160}, WHITE);
+        SDL_Rect pc = {140, 116, 1000, 480};
+        SDL_RenderSetClipRect(gR, &pc);
+        int n = (int)wPics.size();
+        wPicScroll = std::max(0, std::min(wPicScroll, std::max(0, n * 50 - 470)));
+        for (int i = 0; i < n; i++) {
+            int ry = 116 + i * 50 - wPicScroll;
+            if (ry + 46 < 116 || ry > 596) continue;
+            rect(160, ry, 960, 44, i % 2 ? Col{235, 236, 240} : WHITE);
+            std::string nm = wPics[i].substr(wPics[i].find_last_of('/') + 1);
+            text(nm, F22, 176, ry + 8, DARK);
+        }
+        SDL_RenderSetClipRect(gR, nullptr);
+        if (n == 0) text("No pictures found. Draw one in Paint and press Save.", F22, 170, 140, Col{90, 90, 100});
+    } else if (wView == 2) {
+        rect(0, 0, W, UIH, Col{0, 0, 0}, 170);
+        rect(140, 50, 1000, 560, Col{245, 245, 247});
+        text("Insert symbol", F30, 170, 64, blue);
+        btn(980, 58, 130, 44, "Cancel", Col{150, 150, 160}, WHITE);
+        for (int i = 0; i < 40; i++) {
+            int sx = 170 + (i % 10) * 94, sy = 130 + (i / 10) * 112;
+            rect(sx, sy, 88, 100, WHITE);
+            text(SYMS[i], F44, sx + 44, sy + 24, DARK, 1);
+        }
+    }
+}
+static void wordTap(int x, int y) {
+    wEnsure();
+    if (wView == 1) {
+        if (inR(x, y, 980, 58, 130, 44) || !inR(x, y, 140, 50, 1000, 560)) { wView = 0; return; }
+        if (y >= 116 && y < 596) {
+            int i = (y - 116 + wPicScroll) / 50;
+            if (i >= 0 && i < (int)wPics.size()) {
+                WPara np; np.style = 4; np.img = wPics[i]; np.align = 1;
+                wInsertAfter(np); WPara t; wInsertAfter(t);
+                wView = 0; openKb(2);
+            }
+        }
+        return;
+    }
+    if (wView == 2) {
+        if (inR(x, y, 980, 58, 130, 44) || !inR(x, y, 140, 50, 1000, 560)) { wView = 0; return; }
+        for (int i = 0; i < 40; i++) {
+            int sx = 170 + (i % 10) * 94, sy = 130 + (i / 10) * 112;
+            if (inR(x, y, sx, sy, 88, 100)) { wType(SYMS[i]); wView = 0; openKb(2); return; }
+        }
+        return;
+    }
+    if (y >= 44 && y < 90) {
+        for (int i = 0; i < 3; i++) if (inR(x, y, 230 + i * 120, 44, 110, 46)) { wTab = i; return; }
+        return;
+    }
+    if (y >= 90 && y < 154) {
+        for (auto& b : wRibbon()) if (inR(x, y, b.x, 98, b.w, 48)) { wApply(b.id); return; }
+        return;
+    }
+    if (y >= WTOP) {
+        int ry = y - WTOP - 18 + wScroll;
+        int hit = -1;
+        for (int i = 0; i < (int)wY.size(); i++) if (ry >= wY[i] - 4 && ry < wY[i] + wH[i] + 4) { hit = i; break; }
+        if (hit < 0 && !wY.empty() && ry >= wY.back()) hit = (int)wY.size() - 1;
+        if (hit >= 0) wCur = hit;
+        openKb(2); wFollow = true;
+    }
+}
+// @@APPS_B@@
+static void appTouch(int phase, int x, int y) {
+    switch (curApp) {
+        case A_PAINT: paintTouch(phase, x, y); break;
+        // @@TOUCH@@
+        default: break;
+    }
+}
+static void appUpdate(float dt) {
+    (void)dt;
+    // @@UPDATE@@
+}
 static void drawApp() {
     const Theme& th = THEMES[gTheme];
     Col bg = appBg(curApp);
@@ -1107,22 +2081,7 @@ static void drawApp() {
             drawEditor(gNote, SDL_Rect{94, 118, 1092, bottom - 116 - 36}, F30, Col{50, 40, 20}, false, kbOpen && kbTarget == 1, "Tap to start typing");
             break;
         }
-        case A_WORD: {
-            Col blue = Col{43, 87, 154};
-            rect(0, 0, W, UIH, Col{225, 226, 230});
-            rect(0, 34, W, 56, blue);
-            text("Word 2016", F30, 24, 46, WHITE);
-            text(std::to_string(wordCount(gDoc.s)) + " words", F22, 250, 52, WHITE, 0, 200);
-            btn(700, 42, 90, 40, "B", gBold ? WHITE : Col{70, 120, 190}, gBold ? blue : WHITE);
-            btn(800, 42, 90, 40, "A-", Col{70, 120, 190}, WHITE);
-            btn(900, 42, 90, 40, "A+", Col{70, 120, 190}, WHITE);
-            btn(1000, 42, 90, 40, "New", Col{70, 120, 190}, WHITE);
-            btn(1100, 42, 90, 40, "Save", Col{70, 120, 190}, WHITE);
-            int ph = bottom - 104;
-            rect(190, 104, 900, ph, WHITE);
-            drawEditor(gDoc, SDL_Rect{230, 120, 820, ph - 24}, gDocFont, DARK, gBold, kbOpen && kbTarget == 2, "Tap here to start typing");
-            break;
-        }
+        case A_WORD: drawWord(bottom); break;
         case A_EXCEL: {
             Col green = Col{33, 115, 70};
             rect(0, 0, W, UIH, WHITE);
@@ -1172,38 +2131,10 @@ static void drawApp() {
                 outline(XHDRW + (xc - xScrC) * XCOLW, XTOP + (xr - xScrR) * XROWH, XCOLW + 1, XROWH + 1, 3, green);
             break;
         }
-        case A_STORE: {
-            rect(0, 0, W, UIH, bg);
-            appTitle("Store");
-            text("Apps for WinNX", F22, 76, 124, WHITE, 0, 190);
-            static const char* NAMES[2] = {"Word 2016", "Excel 2016"};
-            static const char* D1[2] = {"Write and format documents.", "Spreadsheets with formulas."};
-            static const char* D2[2] = {"Autosaves to your SD card.", "SUM, AVERAGE, MIN, MAX, COUNT."};
-            Col cc[2] = {Col{43, 87, 154}, Col{33, 115, 70}};
-            for (int i = 0; i < 2; i++) {
-                int x = 70 + i * 590, y = 170, w = 550, h = 330;
-                rect(x, y, w, h, WHITE, 38);
-                rect(x + 24, y + 24, 120, 120, cc[i]);
-                text(i == 0 ? "W" : "X", F72, x + 84, y + 40, WHITE, 1);
-                text(NAMES[i], F44, x + 170, y + 28, WHITE);
-                text(D1[i], F22, x + 170, y + 90, WHITE, 0, 220);
-                text(D2[i], F22, x + 170, y + 122, WHITE, 0, 220);
-                int by = y + h - 76;
-                if (storeProg[i] > 0) {
-                    rect(x + 24, by + 20, w - 48, 16, WHITE, 60);
-                    rect(x + 24, by + 20, (int)((w - 48) * storeProg[i]), 16, WHITE);
-                    text("Installing...", F16, x + 24, by - 6, WHITE, 0, 200);
-                } else if (gInstalled[i]) {
-                    btn(x + 24, by, 200, 56, "Open", th.accent, WHITE);
-                    btn(x + 244, by, 200, 56, "Uninstall", Col{80, 80, 80}, WHITE);
-                } else {
-                    btn(x + 24, by, 200, 56, "Install", th.accent, WHITE);
-                    text("Free", F22, x + 244, by + 14, WHITE, 0, 200);
-                }
-            }
-            text("Installed apps appear as tiles on the Start screen.", F16, 76, 530, WHITE, 0, 170);
-            break;
-        }
+        case A_STORE: drawStore(th, bottom); break;
+        case A_BROWSER: drawBrowser(bottom); break;
+        case A_PAINT: drawPaint(); break;
+        // @@DRAW@@
         case A_PHOTOS: {
             rect(0, 0, W, UIH, BLACK);
             if (phTex) {
@@ -1296,14 +2227,7 @@ static void appTap(int x, int y) {
             if (inR(x, y, 1110, 42, 100, 42)) { backupFile(DIR_ + "notes.txt"); gNote.s.clear(); gNote.dirty = true; }
             else if (inR(x, y, 70, 100, 1140, areaBottom() - 116)) openKb(1);
             break;
-        case A_WORD:
-            if (inR(x, y, 700, 42, 90, 40)) { gBold = !gBold; saveCfg(); }
-            else if (inR(x, y, 800, 42, 90, 40)) { gDocFont = std::max(F16, gDocFont - 1); saveCfg(); gDoc.follow = true; }
-            else if (inR(x, y, 900, 42, 90, 40)) { gDocFont = std::min(F44, gDocFont + 1); saveCfg(); gDoc.follow = true; }
-            else if (inR(x, y, 1000, 42, 90, 40)) { backupFile(DIR_ + "document1.txt"); gDoc.s.clear(); gDoc.dirty = true; }
-            else if (inR(x, y, 1100, 42, 90, 40)) { gDoc.dirty = true; saveAll(); }
-            else if (y >= 104) openKb(2);
-            break;
+        case A_WORD: wordTap(x, y); break;
         case A_EXCEL:
             if (inR(x, y, 1000, 40, 90, 38)) {
                 commitCell(); saveAll();
@@ -1321,20 +2245,10 @@ static void appTap(int x, int y) {
                 }
             }
             break;
-        case A_STORE:
-            for (int i = 0; i < 2; i++) {
-                int bx = 70 + i * 590 + 24, by = 170 + 330 - 76;
-                int app = i == 0 ? A_WORD : A_EXCEL;
-                if (storeProg[i] > 0) continue;
-                if (gInstalled[i]) {
-                    if (inR(x, y, bx, by, 200, 56)) { pendingTile = tileIndexFor(app); closeApp(false); return; }
-                    if (inR(x, y, bx + 220, by, 200, 56)) {
-                        if (running[app]) appReset(app);
-                        gInstalled[i] = false; rebuildTiles(); saveCfg();
-                    }
-                } else if (inR(x, y, bx, by, 200, 56)) storeProg[i] = 0.001f;
-            }
-            break;
+        case A_STORE: storeTap(x, y); break;
+        case A_BROWSER: browserTap(x, y); break;
+        case A_PAINT: paintTap(x, y); break;
+        // @@TAP@@
         case A_PHOTOS:
             if (x < W / 3) photoNav(-1);
             else if (x > 2 * W / 3) photoNav(1);
@@ -1355,8 +2269,9 @@ static void appDrag(int dx, int dy) {
     static int accX = 0, accY = 0;
     switch (curApp) {
         case A_NOTES: gNote.scroll -= dy; break;
-        case A_WORD: gDoc.scroll -= dy; break;
+        case A_WORD: if (wView == 1) wPicScroll -= dy; else wScroll -= dy; break;
         case A_GAMES: gamesScroll -= dy; break;
+        case A_STORE: if (storeView == 0) storeScroll -= dy; break;
         case A_EXCEL: {
             accX += dx; accY += dy;
             int sr = accY / XROWH, sc = accX / (XCOLW / 2);
@@ -1403,7 +2318,7 @@ int main(int argc, char** argv) {
     updateNow();
     lastInput = SDL_GetTicks();
     Uint32 prev = lastInput, lastClock = 0, lastBat = 0, lastSave = 0, kbHeldT = 0, kbRep = 0;
-    bool wasDown = false, tMoved = false, tPressWin = false, tTop = false, tKb = false;
+    bool wasDown = false, tMoved = false, tPressWin = false, tTop = false, tKb = false, tApp = false;
     int tDX = 0, tDY = 0, tLX = 0, tLY = 0, pressTile = -1, kbHeld = -1;
     static const int SH[5][2] = {{0, 0}, {2, 1}, {-2, 2}, {1, -2}, {-1, -1}};
 
@@ -1449,7 +2364,7 @@ int main(int argc, char** argv) {
         if (down && !wasDown) {
             lastInput = now; dimA = 0; navMode = false;
             tDX = tx; tDY = ty; tLX = tx; tLY = ty; tMoved = false; scrollV = 0;
-            tTop = false; tKb = false; kbHeld = -1;
+            tTop = false; tKb = false; tApp = false; kbHeld = -1;
             tPressWin = inWinBtn(tx, ty);
             pressTile = (curApp < 0 && appDir == 0 && !tPressWin) ? hitTile(tx, ty) : -1;
             if (appOpen && !tPressWin) {
@@ -1460,7 +2375,7 @@ int main(int argc, char** argv) {
                     int k = kbHit(tx, ty);
                     if (k >= 0) { kbHeld = k; kbHeldT = now; kbRep = now; kbAction(gKeys[k].act); }
                     tKb = true;
-                }
+                } else { tApp = true; appTouch(0, tx, ty); }
             }
         } else if (down && wasDown) {
             lastInput = now;
@@ -1469,6 +2384,7 @@ int main(int argc, char** argv) {
             if (tKb && kbHeld >= 0 && kbHeld < (int)gKeys.size() && gKeys[kbHeld].act == "BS" && now - kbHeldT > 450 && now - kbRep > 70) {
                 kbAction("BS"); kbRep = now;
             }
+            if (tApp && tMoved) appTouch(1, tx, ty);
             if (tMoved && !tKb && !tPressWin) {
                 if (curApp < 0 && appDir == 0) {
                     scrollX = clampf(scrollX - dx, 0, maxScroll);
@@ -1478,6 +2394,7 @@ int main(int argc, char** argv) {
             }
             tLX = tx; tLY = ty;
         } else if (!down && wasDown) {
+            if (tApp) { appTouch(2, tLX, tLY); tApp = false; }
             if (tKb) { kbHeld = -1; }
             else if (tTop) {
                 if (!tMoved && barP > 0.5f && tLY < 44 && appDir == 0) {
@@ -1513,12 +2430,13 @@ int main(int argc, char** argv) {
             }
         }
         if (appDir == 0 && curApp < 0 && pendingTile >= 0) { int t = pendingTile; pendingTile = -1; launch(t); }
-        for (int i = 0; i < 2; i++) {
-            if (storeProg[i] > 0) {
-                storeProg[i] += dt * 0.7f;
-                if (storeProg[i] >= 1) { storeProg[i] = 0; gInstalled[i] = true; rebuildTiles(); saveCfg(); }
+        for (int a = 0; a < A_COUNT; a++) {
+            if (storeProg[a] > 0) {
+                storeProg[a] += dt * 0.7f;
+                if (storeProg[a] >= 1) { storeProg[a] = 0; gInst[a] = true; rebuildTiles(); saveCfg(); }
             }
         }
+        appUpdate(dt);
         if (barT > 0) barT -= dt;
         float barTarget = (barT > 0 && curApp >= 0 && appDir == 0) ? 1.0f : 0.0f;
         barP += (barTarget - barP) * std::min(1.0f, dt * 14.0f);

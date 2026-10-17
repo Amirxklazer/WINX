@@ -17,7 +17,7 @@ INCLUDES	:=	.
 
 APP_TITLE	:=	WinNX
 APP_AUTHOR	:=	Amir
-APP_VERSION	:=	0.2.0
+APP_VERSION	:=	0.3.0
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
@@ -64,10 +64,13 @@ export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
-ifneq ($(wildcard $(TOPDIR)/icon.jpg),)
-	export NROFLAGS += --icon=$(TOPDIR)/icon.jpg
+# The hbmenu icon: must be a 256x256 baseline JPEG called icon.jpg next to this Makefile.
+# The build now FAILS if it is missing instead of silently making an icon-less .nro.
+APP_ICON := $(CURDIR)/icon.jpg
+ifeq ($(wildcard $(APP_ICON)),)
+$(error icon.jpg not found in $(CURDIR) - put icon.jpg (256x256 JPEG) in the repo root next to the Makefile)
 endif
-export NROFLAGS += --nacp=$(CURDIR)/$(TARGET).nacp
+export NROFLAGS += --icon=$(APP_ICON) --nacp=$(CURDIR)/$(TARGET).nacp
 
 .PHONY: $(BUILD) clean all
 
