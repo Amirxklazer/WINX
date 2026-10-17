@@ -1,4 +1,4 @@
-// WinNX v0.3 - Windows 8.1-style tablet shell for Nintendo Switch (SDL2 + libnx)
+// WinNX v0.4 - Windows 8.1-style tablet shell for Nintendo Switch (SDL2 + libnx)
 // Touch-first. Black "bezel" strip at the bottom holds the Windows button (OLED friendly).
 // Everything you write (Notes, Word, Excel) autosaves to sdmc:/switch/WinNX/ and reloads next time.
 #include <switch.h>
@@ -55,6 +55,7 @@ static bool gBurn = true, g24 = true;
 static int gDocFont = F22;
 static bool gBold = false;
 static int gEngine = 0; // CMrhoe search engine: 0 DuckDuckGo, 1 Google, 2 Bing
+static bool gLockScr = true, gBootAnim = true;
 
 static std::string gUser = "User";
 static u32 gBat = 0;
@@ -98,14 +99,25 @@ static void outline(int x, int y, int w, int h, int t, Col c) {
     rect(x, y, w, t, c); rect(x, y + h - t, w, t, c);
     rect(x, y, t, h, c); rect(x + w - t, y, t, h, c);
 }
-static void winLogo(int cx, int cy, int s, Col c, int a = 255) {
-    int g = std::max(2, s / 12), p = (s - g) / 2;
-    int x0 = cx - s / 2, y0 = cy - s / 2;
-    rect(x0, y0, p, p, c, a);
-    rect(x0 + p + g, y0, p, p, c, a);
-    rect(x0, y0 + p + g, p, p, c, a);
-    rect(x0 + p + g, y0 + p + g, p, p, c, a);
+static void quad(float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, Col c, int a = 255) {
+    tri(x1, y1, x2, y2, x3, y3, c, a);
+    tri(x1, y1, x3, y3, x4, y4, c, a);
 }
+// The Windows 8 logo: four perspective panes. h = total logo height in pixels, (cx,cy) = its centre.
+static void logoPanes(float cx, float cy, float h, Col c, int a = 255) {
+    static const float P[4][4][2] = {
+        {{95, 148}, {227, 122}, {227, 268}, {95, 268}},
+        {{246, 118}, {459, 77}, {459, 268}, {246, 268}},
+        {{95, 285}, {227, 285}, {227, 430}, {95, 404}},
+        {{246, 285}, {459, 285}, {459, 475}, {246, 447}}};
+    float k = h / 398.0f;
+    for (int i = 0; i < 4; i++) {
+        float X[4], Y[4];
+        for (int j = 0; j < 4; j++) { X[j] = cx + (P[i][j][0] - 277.0f) * k; Y[j] = cy + (P[i][j][1] - 276.0f) * k; }
+        quad(X[0], Y[0], X[1], Y[1], X[2], Y[2], X[3], Y[3], c, a);
+    }
+}
+static void winLogo(int cx, int cy, int s, Col c, int a = 255) { logoPanes((float)cx, (float)cy, (float)s, c, a); }
 static int tw(const std::string& s, int f) {
     int w = 0, h = 0;
     if (gFont[f] && !s.empty()) TTF_SizeUTF8(gFont[f], s.c_str(), &w, &h);
@@ -343,6 +355,20 @@ static float appT = 0, introT = 0, barT = 0, barP = 0;
 static bool navMode = false;
 static Uint32 lastInput = 0;
 static float dimA = 0;
+// ---- Windows 8 shell state: boot -> lock screen -> start; charms bar, app switcher, search charm
+static int uiState = 0;                  // 0 boot animation, 1 lock screen, 2 desktop/start
+static float bootT = 0, lockOff = 0;
+static bool lockAnim = false;
+static bool charmsOpen = false, switchOpen = false, searchOpen = false;
+static float charmsP = 0, switchP = 0, searchP = 0;
+static std::string gQuery, gToastS, gArg0, gHbMsg;
+static int gHbWhich = 0;
+static Uint32 gToastT = 0;
+static void toast(const std::string& m) { gToastS = m; gToastT = SDL_GetTicks(); }
+static bool overlayOpen() { return charmsOpen || switchOpen || searchOpen; }
+static void closeOverlays() { charmsOpen = switchOpen = searchOpen = false; }
+static void searchGo();
+static void hbRefresh();
 
 static Col appBg(int app) {
     switch (app) {
@@ -366,8 +392,8 @@ static Col appBg(int app) {
 // ---------------------------------------------------------------- settings persistence
 static void saveCfg() {
     std::string b;
-    b += (char)0xA8; b += (char)gTheme; b += (char)gBurn; b += (char)g24;
-    b += (char)gDocFont; b += (char)gBold; b += (char)gEngine;
+    b += (char)0xA9; b += (char)gTheme; b += (char)gBurn; b += (char)g24;
+    b += (char)gDocFont; b += (char)gBold; b += (char)gEngine; b += (char)gLockScr; b += (char)gBootAnim;
     for (int a = 0; a < A_COUNT; a++) b += (char)gInst[a];
     writeFile(DIR_ + "settings.cfg", b);
 }
@@ -382,6 +408,11 @@ static void loadCfg() {
             gDocFont = std::min(F44, std::max(F16, (int)(unsigned char)s[6]));
             gBold = s[7] != 0;
         }
+    } else if (m == 0xA9 && s.size() >= 9) {
+        gTheme = (unsigned char)s[1] % 4; gBurn = s[2] != 0; g24 = s[3] != 0;
+        gDocFont = std::min(F44, std::max(F16, (int)(unsigned char)s[4]));
+        gBold = s[5] != 0; gEngine = (unsigned char)s[6] % 3; gLockScr = s[7] != 0; gBootAnim = s[8] != 0;
+        for (int a = 0; a < A_COUNT && 9 + a < (int)s.size(); a++) gInst[a] = s[9 + a] != 0;
     } else if (m == 0xA8 && s.size() >= 7) {
         gTheme = (unsigned char)s[1] % 4; gBurn = s[2] != 0; g24 = s[3] != 0;
         gDocFont = std::min(F44, std::max(F16, (int)(unsigned char)s[4]));
@@ -648,7 +679,7 @@ static void wType(const std::string& t);
 static void wBack();
 static void appTouch(int phase, int x, int y);
 static void appUpdate(float dt);
-static int kbTarget = 0; // 1 notes, 2 word, 3 excel cell, 4 browser address, 5 store search
+static int kbTarget = 0; // 1 notes, 2 word, 3 excel cell, 4 browser address, 5 store search, 6 search charm
 static bool kbShift = false, kbSym = false;
 static int xRows() { int bottom = kbOpen ? KBTOP : UIH; return std::max(1, (bottom - XTOP) / XROWH); }
 static void xEnsureVisible() {
@@ -699,6 +730,7 @@ static void kbType(const std::string& s) {
     else if (kbTarget == 3) { if (!xEditing) { xEdit.clear(); xEditing = true; } xEdit += s; }
     else if (kbTarget == 4) gUrl += s;
     else if (kbTarget == 5) storeSearch += s;
+    else if (kbTarget == 6) gQuery += s;
 }
 static void kbBackspace() {
     if (kbTarget == 1) { if (!gNote.s.empty()) { gNote.s.pop_back(); gNote.dirty = true; gNote.follow = true; } }
@@ -706,6 +738,7 @@ static void kbBackspace() {
     else if (kbTarget == 3) { startEdit(); if (!xEdit.empty()) xEdit.pop_back(); }
     else if (kbTarget == 4) { if (!gUrl.empty()) gUrl.pop_back(); }
     else if (kbTarget == 5) { if (!storeSearch.empty()) storeSearch.pop_back(); }
+    else if (kbTarget == 6) { if (!gQuery.empty()) gQuery.pop_back(); }
 }
 static void openKb(int target) { kbOpen = true; kbTarget = target; kbShift = false; kbSym = false; }
 static void hideKb() { if (kbTarget == 3) commitCell(); kbOpen = false; }
@@ -717,6 +750,7 @@ static void kbAction(const std::string& a) {
         if (kbTarget == 3) { commitCell(); xr = std::min(xr + 1, XR - 1); xEnsureVisible(); }
         else if (kbTarget == 4) browserGo();
         else if (kbTarget == 5) hideKb();
+        else if (kbTarget == 6) searchGo();
         else kbType("\n");
     }
     else if (a == "HIDE") hideKb();
@@ -1110,6 +1144,7 @@ static void appInit(int app) {
         case A_GAMES: scanGames(); gamesScroll = 0; break;
         case A_STORE: storeStart = SDL_GetTicks(); storeView = 0; storeCat = -1; storeScroll = 0; storeSearch.clear(); break;
         case A_BROWSER: loadHist(); brMsg.clear(); break;
+        case A_SETTINGS: hbRefresh(); gHbMsg.clear(); gHbWhich = 0; break;
         case A_PAINT: paintLoad(); break;
         // @@INIT@@
         default: break;
@@ -1148,6 +1183,7 @@ static void closeApp(bool reset) {
     appDir = -1; appT = 1; gCloseReset = reset;
 }
 static void winPress() {
+    if (overlayOpen()) { closeOverlays(); if (kbTarget == 6) kbOpen = false; if (curApp >= 0) closeApp(false); return; }
     if (curApp >= 0) closeApp(false);
     else if (lastTile >= 0) launch(lastTile);
 }
@@ -1968,8 +2004,103 @@ static void appTouch(int phase, int x, int y) {
         default: break;
     }
 }
+
+// ---------------------------------------------------------------- homebrew menu (hbmenu) replace / backup / restore
+static const char WNX_MARK[] = "WINNX-SELF-MARKER-9c41e7";
+static const char* HB_PATH = "sdmc:/hbmenu.nro";
+static bool gHbHave = false, gHbIsWinNX = false, gHbBackup = false;
+static float gHbConfirm = 0;
+static std::string hbBackupPath() { return DIR_ + "hbmenu_backup.nro"; }
+static long long fileSizeOf(const std::string& p) {
+    struct stat st;
+    if (stat(p.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    return (long long)st.st_size;
+}
+static bool copyFile(const std::string& from, const std::string& to) {
+    FILE* a = fopen(from.c_str(), "rb");
+    if (!a) return false;
+    FILE* b = fopen(to.c_str(), "wb");
+    if (!b) { fclose(a); return false; }
+    std::vector<char> buf(1 << 16);
+    size_t n; bool ok = true;
+    while ((n = fread(buf.data(), 1, buf.size(), a)) > 0) if (fwrite(buf.data(), 1, n, b) != n) { ok = false; break; }
+    fclose(a);
+    if (fclose(b) != 0) ok = false;
+    return ok;
+}
+static bool fileHasMarker(const std::string& p) {
+    FILE* f = fopen(p.c_str(), "rb");
+    if (!f) return false;
+    const size_t L = strlen(WNX_MARK);
+    std::string win, chunk(1 << 16, '\0');
+    bool found = false;
+    size_t n;
+    while (!found && (n = fread(&chunk[0], 1, chunk.size(), f)) > 0) {
+        win.append(chunk, 0, n);
+        if (win.find(WNX_MARK) != std::string::npos) found = true;
+        else if (win.size() > L) win.erase(0, win.size() - L + 1);
+    }
+    fclose(f);
+    return found;
+}
+static std::string selfPath() {
+    std::string c[3] = {gArg0, "sdmc:/switch/WinNX.nro", "sdmc:/switch/WinNX/WinNX.nro"};
+    for (auto& x : c) if (!x.empty() && fileSizeOf(x) > 0 && fileHasMarker(x)) return x;
+    return "";
+}
+static void hbRefresh() {
+    gHbHave = fileSizeOf(HB_PATH) > 0;
+    gHbIsWinNX = gHbHave && fileHasMarker(HB_PATH);
+    gHbBackup = fileSizeOf(hbBackupPath()) > 0;
+}
+static bool safeReplace(const std::string& src, const std::string& dst) {
+    long long n = fileSizeOf(src);
+    if (n <= 0) return false;
+    std::string tmp = dst + ".new";
+    remove(tmp.c_str());
+    if (!copyFile(src, tmp) || fileSizeOf(tmp) != n) { remove(tmp.c_str()); return false; }
+    remove(dst.c_str());
+    if (rename(tmp.c_str(), dst.c_str()) != 0) {
+        bool ok = copyFile(tmp, dst) && fileSizeOf(dst) == n;
+        remove(tmp.c_str());
+        return ok;
+    }
+    return true;
+}
+static void hbInstall() {
+    std::string self = selfPath();
+    if (self.empty()) { gHbMsg = "Couldn't find WinNX.nro. Keep it at sdmc:/switch/WinNX.nro, then try again."; return; }
+    if (self == "sdmc:/hbmenu.nro" || self == "/hbmenu.nro") { gHbMsg = "WinNX is already running as your homebrew menu."; hbRefresh(); return; }
+    bool have = fileSizeOf(HB_PATH) > 0;
+    if (have && !fileHasMarker(HB_PATH)) { // the original hbmenu: back it up first
+        if (!safeReplace(HB_PATH, hbBackupPath())) { gHbMsg = "Backup of hbmenu failed, nothing was changed."; hbRefresh(); return; }
+    } else if (!have && fileSizeOf(hbBackupPath()) <= 0) {
+        gHbMsg = "No hbmenu.nro found on the SD card root, so there is nothing to back up. Nothing was changed.";
+        return;
+    }
+    if (!safeReplace(self, HB_PATH)) { gHbMsg = "Couldn't write sdmc:/hbmenu.nro. Use Restore, or copy it back from a PC."; hbRefresh(); return; }
+    hbRefresh();
+    gHbMsg = "Done. Launching homebrew from the Album now opens WinNX. Original hbmenu saved to switch/WinNX/hbmenu_backup.nro.";
+}
+static void hbRestore() {
+    if (fileSizeOf(hbBackupPath()) <= 0) { gHbMsg = "No backup found at switch/WinNX/hbmenu_backup.nro."; return; }
+    if (!safeReplace(hbBackupPath(), HB_PATH)) { gHbMsg = "Restore failed. Copy switch/WinNX/hbmenu_backup.nro to /hbmenu.nro from a PC."; hbRefresh(); return; }
+    hbRefresh();
+    gHbMsg = "Original hbmenu restored.";
+}
+static void saveAll();
+static void hbOpenOriginal() {
+    std::string t;
+    if (fileSizeOf(hbBackupPath()) > 0) t = hbBackupPath();
+    else if (fileSizeOf(HB_PATH) > 0 && !fileHasMarker(HB_PATH)) t = HB_PATH;
+    if (t.empty()) { gHbMsg = "No original hbmenu found. Settings > Homebrew menu explains how to set one up."; toast("No original hbmenu found"); return; }
+    saveAll();
+    if (R_SUCCEEDED(envSetNextLoad(t.c_str(), t.c_str()))) gRun = false;
+    else toast("Couldn't launch the original hbmenu");
+}
+static void settingsTap(int x, int y, const Theme& th);
 static void appUpdate(float dt) {
-    (void)dt;
+    if (gHbConfirm > 0) { gHbConfirm -= dt; if (gHbConfirm <= 0) gHbWhich = 0; }
     // @@UPDATE@@
 }
 static void drawApp() {
@@ -2024,29 +2155,50 @@ static void drawApp() {
         case A_SETTINGS: {
             rect(0, 0, W, UIH, bg);
             appTitle("Settings");
-            text("Background", F30, 70, 160, WHITE);
+            text("Background", F30, 70, 130, WHITE);
             for (int i = 0; i < 4; i++) {
-                int x = 70 + i * 110;
-                rect(x, 215, 90, 90, mix(THEMES[i].top, THEMES[i].bottom, 0.3f));
-                if (i == gTheme) outline(x - 5, 210, 100, 100, 4, WHITE);
+                int x = 70 + i * 100;
+                rect(x, 178, 80, 80, mix(THEMES[i].top, THEMES[i].bottom, 0.3f));
+                if (i == gTheme) outline(x - 5, 173, 90, 90, 4, WHITE);
             }
-            text("Burn-in protection", F30, 70, 340, WHITE);
-            text("Shifts the screen slightly and dims it when idle (good for OLED)", F16, 70, 380, WHITE, 0, 170);
-            toggle(1060, 345, gBurn, th.accent);
-            text("24-hour clock", F30, 70, 460, WHITE);
-            toggle(1060, 465, g24, th.accent);
-            text("WinNX 0.2 - Windows 8.1-style shell for Nintendo Switch", F16, 70, 580, WHITE, 0, 130);
-            text("Your files autosave to sdmc:/switch/WinNX/", F16, 70, 604, WHITE, 0, 130);
+            static const char* ST[4] = {"Burn-in protection", "24-hour clock", "Lock screen", "Boot animation"};
+            static const char* SD[4] = {"Dims and shifts the screen when idle (OLED)", "Off shows 12-hour time", "Show the lock screen at start-up", "Windows logo animation at start-up"};
+            bool sv[4] = {gBurn, g24, gLockScr, gBootAnim};
+            for (int i = 0; i < 4; i++) {
+                int y = 285 + i * 78;
+                text(ST[i], F30, 70, y, WHITE);
+                text(SD[i], F16, 70, y + 38, WHITE, 0, 160);
+                toggle(520, y + 4, sv[i], th.accent);
+            }
+            text("WinNX 0.4 - Windows 8.1-style shell", F16, 70, 618, WHITE, 0, 130);
+            text("Your files autosave to sdmc:/switch/WinNX/", F16, 70, 640, WHITE, 0, 130);
+            rect(690, 118, 2, 520, WHITE, 40);
+            text("Homebrew menu", F30, 730, 130, WHITE);
+            text("Replace hbmenu so the Album launch opens WinNX.", F16, 730, 174, WHITE, 0, 190);
+            text("Your original hbmenu is backed up first.", F16, 730, 198, WHITE, 0, 190);
+            bool c1 = gHbConfirm > 0 && gHbWhich == 1, c2 = gHbConfirm > 0 && gHbWhich == 2;
+            btn(730, 240, 480, 60, c1 ? "Tap again to confirm" : "Make WinNX my homebrew menu", c1 ? Col{209, 52, 56} : th.accent, WHITE);
+            btn(730, 314, 480, 60, c2 ? "Tap again to confirm" : "Restore original hbmenu", c2 ? Col{209, 52, 56} : Col{90, 90, 96}, WHITE);
+            btn(730, 388, 480, 60, "Open original hbmenu now", Col{90, 90, 96}, WHITE);
+            text(std::string("WinNX is the homebrew menu: ") + (gHbIsWinNX ? "Yes" : "No"), F22, 730, 468, WHITE);
+            text(std::string("Backup of original: ") + (gHbBackup ? "saved" : "none"), F22, 730, 500, WHITE);
+            int my = 540;
+            for (auto& l : wrapText(gHbMsg, F16, 480)) { text(l, F16, 730, my, Col{255, 230, 140}); my += 22; }
+            text("Rescue: hold B + Y while WinNX starts to jump to the original hbmenu.", F16, 730, 626, WHITE, 0, 140);
             break;
         }
         case A_POWER: {
             rect(0, 0, W, UIH, bg);
             appTitle("Power");
-            text("Exit WinNX and return to the homebrew menu?", F30, 70, 190, WHITE);
-            rect(70, 300, 260, 90, Col{209, 52, 56});
-            text("Exit", F44, 200, 322, WHITE, 1);
-            rect(350, 300, 260, 90, Col{80, 80, 80});
-            text("Cancel", F44, 480, 322, WHITE, 1);
+            text("Exit WinNX, lock the screen, or open the original hbmenu.", F30, 70, 170, WHITE);
+            rect(70, 260, 260, 90, Col{209, 52, 56});
+            text("Exit", F44, 200, 282, WHITE, 1);
+            rect(350, 260, 260, 90, Col{40, 120, 200});
+            text("Lock", F44, 480, 282, WHITE, 1);
+            rect(630, 260, 260, 90, Col{80, 80, 80});
+            text("Cancel", F44, 760, 282, WHITE, 1);
+            rect(70, 380, 820, 90, Col{70, 70, 76});
+            text("Open original hbmenu", F44, 480, 402, WHITE, 1);
             break;
         }
         case A_DESKTOP: {
@@ -2199,6 +2351,24 @@ static void drawTopBar() {
     line(W - 58, y + 31, W - 32, y + 13, 3, WHITE);
 }
 
+static void settingsTap(int x, int y, const Theme& th) {
+    (void)th;
+    for (int i = 0; i < 4; i++) if (inR(x, y, 70 + i * 100, 178, 80, 80)) { gTheme = i; saveCfg(); return; }
+    for (int i = 0; i < 4; i++) {
+        int ry = 285 + i * 78;
+        if (inR(x, y, 70, ry - 6, 600, 74)) {
+            if (i == 0) gBurn = !gBurn; else if (i == 1) g24 = !g24; else if (i == 2) gLockScr = !gLockScr; else gBootAnim = !gBootAnim;
+            saveCfg(); return;
+        }
+    }
+    if (inR(x, y, 730, 240, 480, 60)) {
+        if (gHbConfirm > 0 && gHbWhich == 1) { gHbConfirm = 0; gHbWhich = 0; hbInstall(); }
+        else { gHbWhich = 1; gHbConfirm = 4; gHbMsg.clear(); }
+    } else if (inR(x, y, 730, 314, 480, 60)) {
+        if (gHbConfirm > 0 && gHbWhich == 2) { gHbConfirm = 0; gHbWhich = 0; hbRestore(); }
+        else { gHbWhich = 2; gHbConfirm = 4; gHbMsg.clear(); }
+    } else if (inR(x, y, 730, 388, 480, 60)) hbOpenOriginal();
+}
 static void appTap(int x, int y) {
     switch (curApp) {
         case A_CALC:
@@ -2208,16 +2378,13 @@ static void appTap(int x, int y) {
             }
             break;
         case A_SETTINGS:
-            for (int i = 0; i < 4; i++) {
-                int sx = 70 + i * 110;
-                if (inR(x, y, sx, 215, 90, 90)) { gTheme = i; saveCfg(); }
-            }
-            if (y >= 320 && y < 430) { gBurn = !gBurn; saveCfg(); }
-            else if (y >= 440 && y < 540) { g24 = !g24; saveCfg(); }
+            settingsTap(x, y, THEMES[gTheme]);
             break;
         case A_POWER:
-            if (inR(x, y, 70, 300, 260, 90)) gRun = false;
-            if (inR(x, y, 350, 300, 260, 90)) closeApp(false);
+            if (inR(x, y, 70, 260, 260, 90)) gRun = false;
+            else if (inR(x, y, 350, 260, 260, 90)) { closeApp(false); uiState = 1; lockOff = 0; lockAnim = false; }
+            else if (inR(x, y, 630, 260, 260, 90)) closeApp(false);
+            else if (inR(x, y, 70, 380, 820, 90)) hbOpenOriginal();
             break;
         case A_DESKTOP:
             for (auto& c : deskChips())
@@ -2283,9 +2450,289 @@ static void appDrag(int dx, int dy) {
     }
 }
 
+// ---------------------------------------------------------------- boot animation, lock screen, charms, switcher
+static SDL_Texture* gLockTex = nullptr;
+static const float BOOT_END = 4.3f;
+static void fdisc(float cx, float cy, float r, Col c) {
+    const int N = 120;
+    SDL_Vertex v[N + 1];
+    int idx[N * 3];
+    SDL_Color sc = {c.r, c.g, c.b, 255};
+    v[0].position.x = cx; v[0].position.y = cy; v[0].color = sc; v[0].tex_coord.x = 0; v[0].tex_coord.y = 0;
+    for (int i = 0; i < N; i++) {
+        float a = 6.2831853f * i / N;
+        v[i + 1].position.x = cx + cosf(a) * r; v[i + 1].position.y = cy + sinf(a) * r;
+        v[i + 1].color = sc; v[i + 1].tex_coord.x = 0; v[i + 1].tex_coord.y = 0;
+        idx[i * 3] = 0; idx[i * 3 + 1] = i + 1; idx[i * 3 + 2] = (i + 1) % N + 1;
+    }
+    SDL_RenderGeometry(gR, nullptr, v, N + 1, idx, N * 3);
+}
+static void lockInit() {
+    gLockTex = SDL_CreateTexture(gR, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, W, UIH);
+    if (!gLockTex) return;
+    SDL_SetTextureBlendMode(gLockTex, SDL_BLENDMODE_NONE);
+    SDL_SetRenderTarget(gR, gLockTex);
+    SDL_Surface* sf = IMG_Load((DIR_ + "lockscreen.jpg").c_str());
+    if (!sf) sf = IMG_Load((DIR_ + "lockscreen.png").c_str());
+    bool custom = false;
+    if (sf) { // your own lock screen picture: put lockscreen.jpg or lockscreen.png in switch/WinNX/
+        int sw = sf->w, sh = sf->h;
+        SDL_Texture* t = SDL_CreateTextureFromSurface(gR, sf);
+        SDL_FreeSurface(sf);
+        if (t) {
+            float k = std::max((float)W / sw, (float)UIH / sh);
+            int dw = (int)(sw * k), dh = (int)(sh * k);
+            SDL_Rect d = {(W - dw) / 2, (UIH - dh) / 2, dw, dh};
+            SDL_RenderCopy(gR, t, nullptr, &d);
+            SDL_DestroyTexture(t);
+            custom = true;
+        }
+    }
+    if (!custom) { // default: colourful sweeping bands like the Windows 8 lock screen
+        SDL_SetRenderDrawColor(gR, 58, 58, 62, 255);
+        SDL_RenderClear(gR);
+        static const Col LP[] = {{190, 50, 40}, {222, 92, 30}, {238, 150, 30}, {244, 196, 50}, {236, 226, 196}, {208, 196, 170},
+                                 {120, 170, 100}, {30, 120, 78}, {16, 92, 70}, {40, 112, 160}, {30, 70, 130}, {98, 60, 140},
+                                 {190, 60, 100}, {210, 70, 50}, {236, 140, 40}, {240, 200, 60}, {230, 222, 190}, {70, 100, 40}};
+        const int NP = (int)(sizeof(LP) / sizeof(LP[0]));
+        float r = 2700;
+        unsigned seed = 7;
+        int i = 0;
+        while (r > 950) {
+            fdisc(1500, -420, r, mix(LP[i % NP], Col{36, 36, 40}, std::min(0.5f, std::max(0.0f, (r - 1500) / 1600.0f))));
+            seed = seed * 1103515245u + 12345u;
+            r -= 14 + (int)((seed >> 16) % 26);
+            i++;
+        }
+        fdisc(1500, -420, r, Col{78, 72, 10});
+    }
+    // darken the bottom so the clock stays readable
+    for (int k = 0; k < 40; k++) {
+        float f = powf(k / 40.0f, 1.3f);
+        rect(0, UIH - 420 + (int)(k * 10.5f), W, 11, BLACK, (int)(150 * f));
+    }
+    SDL_SetRenderTarget(gR, nullptr);
+}
+static void drawBoot(float t) {
+    Col bg = {252, 252, 255}, lb = {0, 164, 239}, pane = {102, 211, 255};
+    rect(0, 0, W, UIH, bg);
+    float cx = W / 2.0f, cy = UIH / 2.0f;
+    if (t < 1.5f) {
+        float u = ease(t / 1.4f);
+        float S = 640.0f + (150.0f - 640.0f) * u;
+        float pa = 1.0f - clampf((t - 0.45f) / 0.6f, 0, 1);
+        if (pa > 0) {
+            float k = (UIH / 338.0f) * (1.0f - 0.55f * u);
+            static const float Q[4][2] = {{-42, -59}, {114, -159}, {114, 157}, {-42, 59}};
+            quad(cx + Q[0][0] * k, cy + Q[0][1] * k, cx + Q[1][0] * k, cy + Q[1][1] * k,
+                 cx + Q[2][0] * k, cy + Q[2][1] * k, cx + Q[3][0] * k, cy + Q[3][1] * k, pane, (int)(pa * 255));
+        }
+        logoPanes(cx, cy, S, lb, (int)(clampf((t - 0.35f) / 0.7f, 0, 1) * 255));
+    } else {
+        float s2 = ease((t - 1.5f) / 0.8f);
+        int textW = tw("WinNX", F72);
+        float logoH = 150, logoW = logoH * 364.0f / 398.0f, gap = 28;
+        float total = logoW + gap + textW;
+        float fin = cx - total / 2 + logoW / 2;
+        float lx = cx + (fin - cx) * s2;
+        logoPanes(lx, cy, logoH, lb, 255);
+        text("WinNX", F72, (int)(lx + logoW / 2 + gap), (int)cy - 50, lb, 0, (int)(s2 * 255));
+        float ba = ease((t - 2.4f) / 0.6f);
+        text("by Amir", F22, W / 2, UIH - 120, lb, 1, (int)(ba * 255));
+    }
+    if (t > 3.7f) rect(0, 0, W, UIH, BLACK, (int)(clampf((t - 3.7f) / 0.5f, 0, 1) * 255));
+}
+static void drawLock(float off) {
+    int o = (int)off;
+    if (gLockTex) { SDL_Rect d = {0, o, W, UIH}; SDL_RenderCopy(gR, gLockTex, nullptr, &d); }
+    else rect(0, o, W, UIH, Col{40, 40, 44});
+    std::string tm = timeStr(false);
+    text(tm, F130, 52, o + UIH - 340, BLACK, 0, 70);
+    text(tm, F130, 50, o + UIH - 342, WHITE);
+    std::string ds = dateStr();
+    text(ds, F44, 56, o + UIH - 176, BLACK, 0, 70);
+    text(ds, F44, 54, o + UIH - 178, WHITE);
+    char bb[48];
+    snprintf(bb, sizeof bb, "%s   %u%%", gUser.c_str(), (unsigned)gBat);
+    text(bb, F22, 56, o + UIH - 100, WHITE, 0, 220);
+    float bounce = sinf(SDL_GetTicks() / 350.0f) * 5.0f;
+    int hy = o + UIH - 62 + (int)bounce;
+    line(W / 2 - 14, hy + 8, W / 2, hy - 4, 3, WHITE, 200);
+    line(W / 2 + 14, hy + 8, W / 2, hy - 4, 3, WHITE, 200);
+    text("Swipe up to unlock", F16, W / 2, o + UIH - 40, WHITE, 1, 200);
+    if (o < 0) rect(0, o + UIH, W, 5, BLACK, 70);
+}
+static void unlockNow() {
+    if (uiState == 1 && !lockAnim) { lockAnim = true; introT = 0; }
+}
+
+// ---- search charm helpers
+static std::vector<int> searchHits() {
+    std::vector<int> v;
+    std::string q = lower(gQuery);
+    if (q.empty()) return v;
+    for (int i = 0; i < (int)gTiles.size(); i++) if (lower(gTiles[i].label).find(q) != std::string::npos) v.push_back(i);
+    return v;
+}
+static void gotoTile(int t) {
+    closeOverlays();
+    if (kbTarget == 6) kbOpen = false;
+    if (t < 0 || t >= (int)gTiles.size()) return;
+    if (curApp == gTiles[t].app) return;
+    pendingTile = t;
+    if (curApp >= 0) closeApp(false);
+}
+static void searchGo() {
+    std::vector<int> h = searchHits();
+    if (!h.empty()) { gotoTile(h[0]); return; }
+    if (gQuery.find_first_not_of(' ') == std::string::npos) return;
+    closeOverlays(); kbOpen = false;
+    gUrl = gQuery;
+    browserGo();
+}
+
+static const int CH_X = W - 120;
+static void drawCharms() {
+    if (charmsP <= 0.01f) return;
+    float e = ease(charmsP);
+    int off = (int)((1.0f - e) * 120);
+    Col pb = {14, 14, 16};
+    rect(CH_X + off, 0, 120, UIH, pb, 245);
+    static const char* CN[5] = {"Search", "Share", "Start", "Devices", "Settings"};
+    for (int i = 0; i < 5; i++) {
+        int cy = 90 + i * 110, cx = CH_X + off + 60;
+        Col c = WHITE;
+        switch (i) {
+            case 0: ring(cx - 6, cy - 6, 18, 4, c, pb); line(cx + 7, cy + 7, cx + 20, cy + 20, 5, c); break;
+            case 1: disc(cx - 16, cy, 7, c); disc(cx + 14, cy - 14, 7, c); disc(cx + 14, cy + 14, 7, c);
+                    line(cx - 16, cy, cx + 14, cy - 14, 2, c); line(cx - 16, cy, cx + 14, cy + 14, 2, c); break;
+            case 2: winLogo(cx, cy, 44, c); break;
+            case 3: outline(cx - 22, cy - 14, 32, 22, 3, c); outline(cx - 4, cy - 2, 28, 18, 3, c); break;
+            default: ring(cx, cy, 18, 6, c, pb);
+                     for (int k = 0; k < 8; k++) { float a = k * 0.785398f; disc(cx + (int)(sinf(a) * 21), cy - (int)(cosf(a) * 21), 4, c); }
+                     disc(cx, cy, 8, pb); break;
+        }
+        text(CN[i], F16, cx, cy + 34, WHITE, 1);
+    }
+    int lx = (int)((1.0f - e) * -560);
+    rect(30 + lx, UIH - 250, 540, 210, pb, 240);
+    text(timeStr(true), F72, 56 + lx, UIH - 240, WHITE);
+    text(dateStr(), F30, 56 + lx, UIH - 140, WHITE);
+    char bb[32]; snprintf(bb, sizeof bb, "Battery %u%%", (unsigned)gBat);
+    text(bb, F22, 56 + lx, UIH - 94, WHITE, 0, 200);
+}
+static void drawSearchCharm() {
+    if (searchP <= 0.01f) return;
+    float e = ease(searchP);
+    int px = W - 440 + (int)((1.0f - e) * 440);
+    rect(px, 0, 440, UIH, Col{24, 24, 28}, 250);
+    text("Search", F44, px + 24, 20, WHITE);
+    rect(px + 20, 92, 400, 52, WHITE);
+    std::string sh = gQuery;
+    if (kbOpen && kbTarget == 6 && (SDL_GetTicks() / 500) % 2 == 0) sh += "|";
+    if (gQuery.empty() && !(kbOpen && kbTarget == 6)) text("Apps", F22, px + 34, 104, Col{150, 150, 150});
+    else {
+        while (sh.size() > 2 && tw(sh, F22) > 370) sh.erase(0, 1);
+        text(sh, F22, px + 34, 104, DARK);
+    }
+    int bottom = kbOpen ? KBTOP : UIH;
+    int maxRows = std::max(1, (bottom - 170) / 64);
+    std::vector<int> h = searchHits();
+    int row = 0;
+    for (int i = 0; i < (int)h.size() && row < maxRows - 1; i++, row++) {
+        int y = 164 + row * 64;
+        const Tile& t = gTiles[h[i]];
+        rect(px + 20, y, 400, 58, Col{44, 44, 52});
+        rect(px + 20, y, 58, 58, t.color);
+        text(t.label, F22, px + 92, y + 14, WHITE);
+    }
+    if (!gQuery.empty() && row < maxRows) {
+        int y = 164 + row * 64;
+        rect(px + 20, y, 400, 58, Col{44, 44, 52});
+        rect(px + 20, y, 58, 58, Col{219, 68, 55});
+        std::string q = gQuery;
+        while (q.size() > 3 && tw(q, F16) > 250) q.pop_back();
+        text("Search web: " + q, F16, px + 92, y + 20, WHITE);
+    }
+    if (gQuery.empty()) text("Type the name of an app", F16, px + 24, 170, WHITE, 0, 150);
+}
+static void drawSwitcher() {
+    if (switchP <= 0.01f) return;
+    float e = ease(switchP);
+    int px = -220 + (int)(e * 220);
+    rect(px, 0, 220, UIH, Col{18, 18, 22}, 248);
+    const Theme& th = THEMES[gTheme];
+    int y = 24;
+    rect(px + 20, y, 180, 100, mix(th.top, th.bottom, 0.4f));
+    winLogo(px + 110, y + 50, 40, WHITE);
+    text("Start", F16, px + 20, y + 104, WHITE);
+    y += 140;
+    for (int a = 0; a < A_COUNT && y < UIH - 130; a++) {
+        if (!running[a]) continue;
+        rect(px + 20, y, 180, 100, appBg(a));
+        if (a == curApp) outline(px + 20, y, 180, 100, 3, WHITE);
+        text(appName(a), F16, px + 20, y + 104, WHITE);
+        y += 140;
+    }
+}
+static void overlayTap(int x, int y) {
+    if (searchOpen) {
+        if (x < W - 440) { closeOverlays(); if (kbTarget == 6) kbOpen = false; return; }
+        if (inR(x, y, W - 420, 92, 400, 52)) { openKb(6); return; }
+        std::vector<int> h = searchHits();
+        int bottom = kbOpen ? KBTOP : UIH;
+        int maxRows = std::max(1, (bottom - 170) / 64);
+        int row = (y - 164) / 64;
+        if (y >= 164 && row >= 0) {
+            if (row < (int)h.size() && row < maxRows - 1) gotoTile(h[row]);
+            else if (row == std::min((int)h.size(), maxRows - 1) && !gQuery.empty()) {
+                closeOverlays(); kbOpen = false; gUrl = gQuery; browserGo();
+            }
+        }
+        return;
+    }
+    if (charmsOpen) {
+        if (x < CH_X) { closeOverlays(); return; }
+        int i = (y - 35) / 110;
+        if (y < 35 || i < 0 || i > 4) return;
+        switch (i) {
+            case 0: charmsOpen = false; searchOpen = true; gQuery.clear(); openKb(6); break;
+            case 1: toast("Nothing to share here"); break;
+            case 2: closeOverlays(); if (curApp >= 0) closeApp(false); break;
+            case 3: toast("Pair controllers in the Switch Controllers menu"); break;
+            default: {
+                closeOverlays();
+                int t = tileIndexFor(A_SETTINGS);
+                if (t >= 0 && curApp != A_SETTINGS) { pendingTile = t; if (curApp >= 0) closeApp(false); }
+            }
+        }
+        return;
+    }
+    if (switchOpen) {
+        if (x >= 220) { closeOverlays(); return; }
+        if (y >= 24 && y < 124) { closeOverlays(); if (curApp >= 0) closeApp(false); return; }
+        int yy = 164;
+        for (int a = 0; a < A_COUNT && yy < UIH - 130; a++) {
+            if (!running[a]) continue;
+            if (y >= yy && y < yy + 100) {
+                closeOverlays();
+                if (a != curApp) { int t = tileIndexFor(a); if (t >= 0) { pendingTile = t; if (curApp >= 0) closeApp(false); } }
+                return;
+            }
+            yy += 140;
+        }
+    }
+}
+static void drawToast() {
+    if (gToastS.empty() || SDL_GetTicks() - gToastT > 2600) return;
+    int w2 = tw(gToastS, F22) + 48;
+    rect((W - w2) / 2, UIH - 110, w2, 52, Col{20, 20, 22}, 240);
+    text(gToastS, F22, W / 2, UIH - 99, WHITE, 1);
+}
+
 // ---------------------------------------------------------------- main
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+    if (argc > 0 && argv && argv[0]) gArg0 = argv[0];
     plInitialize(PlServiceType_User);
     timeInitialize();
     psmInitialize();
@@ -2295,6 +2742,14 @@ int main(int argc, char** argv) {
     hidInitializeTouchScreen();
     mkdir("sdmc:/switch", 0777);
     mkdir("sdmc:/switch/WinNX", 0777);
+    padUpdate(&gPad);
+    { // rescue: hold B + Y while starting to jump straight to the original hbmenu
+        u64 kh = padGetButtons(&gPad);
+        if ((kh & HidNpadButton_B) && (kh & HidNpadButton_Y)) {
+            std::string t = hbBackupPath();
+            if (fileSizeOf(t) > 0 && R_SUCCEEDED(envSetNextLoad(t.c_str(), t.c_str()))) return 0;
+        }
+    }
     loadCfg();
     loadUser();
     rebuildTiles();
@@ -2315,10 +2770,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    lockInit();
+    uiState = gBootAnim ? 0 : (gLockScr ? 1 : 2);
     updateNow();
     lastInput = SDL_GetTicks();
     Uint32 prev = lastInput, lastClock = 0, lastBat = 0, lastSave = 0, kbHeldT = 0, kbRep = 0;
-    bool wasDown = false, tMoved = false, tPressWin = false, tTop = false, tKb = false, tApp = false;
+    bool wasDown = false, tMoved = false, tPressWin = false, tTop = false, tKb = false, tApp = false, tOv = false, wasRaw = false, lkDrag = false;
+    int tEdge = 0, lkY0 = 0, lkTapMoved = 0;
     int tDX = 0, tDY = 0, tLX = 0, tLY = 0, pressTile = -1, kbHeld = -1;
     static const int SH[5][2] = {{0, 0}, {2, 1}, {-2, 2}, {1, -2}, {-1, -1}};
 
@@ -2337,8 +2795,36 @@ int main(int argc, char** argv) {
 
         // ---- buttons
         padUpdate(&gPad);
-        u64 kd = padGetButtonsDown(&gPad);
-        if (kd) { lastInput = now; dimA = 0; }
+        u64 kdRaw = padGetButtonsDown(&gPad);
+        u64 kd = (uiState == 2) ? kdRaw : 0;
+        if (kdRaw) { lastInput = now; dimA = 0; }
+        HidTouchScreenState ts = {0};
+        hidGetTouchScreenStates(&ts, 1);
+        bool downRaw = ts.count > 0;
+        int rawX = downRaw ? (int)ts.touches[0].x : 0, rawY = downRaw ? (int)ts.touches[0].y : 0;
+        // ---- boot animation and lock screen
+        if (uiState == 0) {
+            bootT += dt;
+            if ((kdRaw || (downRaw && !wasRaw)) && bootT > 0.4f && bootT < BOOT_END - 0.5f) bootT = BOOT_END - 0.5f;
+            if (bootT >= BOOT_END) { uiState = gLockScr ? 1 : 2; lockOff = 0; lockAnim = false; introT = 0; }
+        } else if (uiState == 1) {
+            if (lockAnim) {
+                lockOff -= (UIH * 2.4f + 200) * dt;
+                if (lockOff <= -UIH) { lockOff = 0; lockAnim = false; uiState = 2; introT = 0; }
+            } else {
+                if (kdRaw & (HidNpadButton_A | HidNpadButton_Plus | HidNpadButton_B)) unlockNow();
+                if (downRaw && !wasRaw) { lkDrag = true; lkY0 = rawY; lkTapMoved = 0; }
+                if (downRaw && lkDrag) { lockOff = std::min(0.0f, (float)(rawY - lkY0)); lkTapMoved = std::max(lkTapMoved, lkY0 - rawY); }
+                else if (!downRaw && wasRaw && lkDrag) {
+                    lkDrag = false;
+                    if (lockOff < -140 || lkTapMoved > 140) unlockNow();
+                    else if (lkTapMoved < 14) lockOff = -50; // a tap makes the lock screen bounce
+                }
+                if (!lkDrag && !lockAnim) lockOff += (0 - lockOff) * std::min(1.0f, dt * 9.0f);
+            }
+        }
+        if (kd & HidNpadButton_Minus) { if (overlayOpen()) closeOverlays(); else charmsOpen = true; }
+        if ((kd & HidNpadButton_B) && overlayOpen()) { closeOverlays(); if (kbTarget == 6) kbOpen = false; kd &= ~(u64)HidNpadButton_B; }
         if (kd & HidNpadButton_Plus) winPress();
         if (curApp < 0 && appDir == 0) {
             if (kd & HidNpadButton_AnyLeft) { navMode = true; navigate(0); }
@@ -2356,18 +2842,25 @@ int main(int argc, char** argv) {
         }
 
         // ---- touch
-        HidTouchScreenState ts = {0};
-        hidGetTouchScreenStates(&ts, 1);
-        bool down = ts.count > 0;
-        int tx = down ? (int)ts.touches[0].x : tLX, ty = down ? (int)ts.touches[0].y : tLY;
+        bool down = downRaw && uiState == 2;
+        int tx = down ? rawX : tLX, ty = down ? rawY : tLY;
         bool appOpen = curApp >= 0 && appDir == 0;
         if (down && !wasDown) {
             lastInput = now; dimA = 0; navMode = false;
             tDX = tx; tDY = ty; tLX = tx; tLY = ty; tMoved = false; scrollV = 0;
-            tTop = false; tKb = false; tApp = false; kbHeld = -1;
+            tTop = false; tKb = false; tApp = false; kbHeld = -1; tOv = false; tEdge = 0;
             tPressWin = inWinBtn(tx, ty);
-            pressTile = (curApp < 0 && appDir == 0 && !tPressWin) ? hitTile(tx, ty) : -1;
-            if (appOpen && !tPressWin) {
+            if (!tPressWin && overlayOpen()) {
+                if (kbOpen && ty >= KBTOP && ty < UIH) {
+                    buildKeys();
+                    int k = kbHit(tx, ty);
+                    if (k >= 0) { kbHeld = k; kbHeldT = now; kbRep = now; kbAction(gKeys[k].act); }
+                    tKb = true;
+                } else { tOv = true; tKb = true; }
+            } else if (!tPressWin && ty < UIH && tx >= W - 12) tEdge = 1;
+            else if (!tPressWin && ty < UIH && tx <= 12) tEdge = 2;
+            pressTile = (curApp < 0 && appDir == 0 && !tPressWin && !tKb && !tEdge) ? hitTile(tx, ty) : -1;
+            if (appOpen && !tPressWin && !tKb && !tEdge) {
                 if (ty < 30) { barT = 3.5f; tTop = true; }
                 else if (barP > 0.5f && ty < 44) tTop = true;
                 else if (kbOpen && ty >= KBTOP && ty < UIH) {
@@ -2384,8 +2877,10 @@ int main(int argc, char** argv) {
             if (tKb && kbHeld >= 0 && kbHeld < (int)gKeys.size() && gKeys[kbHeld].act == "BS" && now - kbHeldT > 450 && now - kbRep > 70) {
                 kbAction("BS"); kbRep = now;
             }
+            if (tEdge == 1 && tx < tDX - 36) { charmsOpen = true; tEdge = 3; }
+            if (tEdge == 2 && tx > tDX + 36) { switchOpen = true; tEdge = 3; }
             if (tApp && tMoved) appTouch(1, tx, ty);
-            if (tMoved && !tKb && !tPressWin) {
+            if (tMoved && !tKb && !tPressWin && !tEdge) {
                 if (curApp < 0 && appDir == 0) {
                     scrollX = clampf(scrollX - dx, 0, maxScroll);
                     scrollV = (float)-dx;
@@ -2395,7 +2890,9 @@ int main(int argc, char** argv) {
             tLX = tx; tLY = ty;
         } else if (!down && wasDown) {
             if (tApp) { appTouch(2, tLX, tLY); tApp = false; }
-            if (tKb) { kbHeld = -1; }
+            if (tOv) { if (!tMoved) overlayTap(tLX, tLY); tOv = false; tKb = false; kbHeld = -1; }
+            else if (tEdge) { if (!tMoved && tEdge == 1) charmsOpen = true; if (!tMoved && tEdge == 2) switchOpen = true; tEdge = 0; }
+            else if (tKb) { kbHeld = -1; }
             else if (tTop) {
                 if (!tMoved && barP > 0.5f && tLY < 44 && appDir == 0) {
                     if (tLX >= W - 90) closeApp(true);
@@ -2412,6 +2909,7 @@ int main(int argc, char** argv) {
             tPressWin = false; pressTile = -1; tTop = false;
         }
         wasDown = down;
+        wasRaw = downRaw;
 
         // ---- updates
         if (!down && scrollV != 0) {
@@ -2437,6 +2935,9 @@ int main(int argc, char** argv) {
             }
         }
         appUpdate(dt);
+        charmsP += ((charmsOpen ? 1.0f : 0.0f) - charmsP) * std::min(1.0f, dt * 14.0f);
+        switchP += ((switchOpen ? 1.0f : 0.0f) - switchP) * std::min(1.0f, dt * 14.0f);
+        searchP += ((searchOpen ? 1.0f : 0.0f) - searchP) * std::min(1.0f, dt * 14.0f);
         if (barT > 0) barT -= dt;
         float barTarget = (barT > 0 && curApp >= 0 && appDir == 0) ? 1.0f : 0.0f;
         barP += (barTarget - barP) * std::min(1.0f, dt * 14.0f);
@@ -2468,8 +2969,18 @@ int main(int argc, char** argv) {
                 drawTopBar();
             }
         }
+        if (uiState == 2 || lockAnim) {
+            if (charmsP > 0.01f || switchP > 0.01f || searchP > 0.01f) rect(0, 0, W, UIH, BLACK, 70);
+            drawSwitcher();
+            drawCharms();
+            drawSearchCharm();
+            if (kbOpen && kbTarget == 6) drawKb();
+            drawToast();
+        }
+        if (uiState == 0) drawBoot(bootT);
+        else if (uiState == 1) drawLock(lockOff);
         rect(0, UIH, W, H - UIH, BLACK);
-        bool wb = down && tPressWin;
+        bool wb = downRaw && tPressWin;
         winLogo(W / 2, UIH + (H - UIH) / 2, 26, WHITE, wb ? 255 : 105);
         if (dimA > 1) rect(0, 0, W, H, BLACK, (int)dimA);
 
@@ -2487,6 +2998,7 @@ int main(int argc, char** argv) {
     saveAll();
     saveCfg();
     if (phTex) SDL_DestroyTexture(phTex);
+    if (gLockTex) SDL_DestroyTexture(gLockTex);
     for (auto& p : gTC) SDL_DestroyTexture(p.second.t);
     for (int i = 0; i < FCOUNT; i++) if (gFont[i]) TTF_CloseFont(gFont[i]);
     if (gTarget) SDL_DestroyTexture(gTarget);
