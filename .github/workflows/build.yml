@@ -48,8 +48,8 @@ jobs:
           if [ "$ICON" -le 0 ]; then echo "::error::Icon allocation size error detected inside NRO envelope!"; exit 1; fi
 
       - name: Upload NRO
-        uses: actions/artifacts@v4
+        uses: actions/upload-artifact@v4
         with:
           name: WinNX
           path: "*.nro"
-          if-not-found: error
+          if-no-files-found: error
