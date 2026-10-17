@@ -16,8 +16,8 @@ DATA		:=
 INCLUDES	:=	.
 
 APP_TITLE	:=	WinNX
-APP_AUTHOR	:=	Amir
-APP_VERSION	:=	0.4.0
+APP_AUTHOR	:=	WinNX
+APP_VERSION	:=	0.5.0
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 

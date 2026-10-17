@@ -17,6 +17,9 @@
 #include <map>
 #include <algorithm>
 #include <ctime>
+#include "bootanim.h"
+#include "font_sel_reg.h"
+#include "font_sel_bold.h"
 
 static const int W = 1280, H = 720, UIH = 668; // UIH = screen area above the black bezel strip
 static const int KBH = 300, KBTOP = UIH - KBH;
@@ -40,6 +43,8 @@ static bool gRun = true;
 static const int F16 = 0, F22 = 1, F30 = 2, F44 = 3, F72 = 4, F130 = 5, FCOUNT = 6;
 static const int FSZ[FCOUNT] = {16, 22, 30, 44, 72, 130};
 static TTF_Font* gFont[FCOUNT];
+static TTF_Font* gFontB[FCOUNT];   // bold
+static TTF_Font* gFontSys[FCOUNT]; // Switch system font: fallback for symbols the UI font lacks
 struct TT { SDL_Texture* t; int w, h; };
 static std::map<std::string, TT> gTC;
 
@@ -105,22 +110,43 @@ static void quad(float x1, float y1, float x2, float y2, float x3, float y3, flo
 }
 // The Windows 8 logo: four perspective panes. h = total logo height in pixels, (cx,cy) = its centre.
 static void logoPanes(float cx, float cy, float h, Col c, int a = 255) {
+    // traced from the official Windows 8 logo: four panes with perspective, 8 px gaps
     static const float P[4][4][2] = {
-        {{95, 148}, {227, 122}, {227, 268}, {95, 268}},
-        {{246, 118}, {459, 77}, {459, 268}, {246, 268}},
-        {{95, 285}, {227, 285}, {227, 430}, {95, 404}},
-        {{246, 285}, {459, 285}, {459, 475}, {246, 447}}};
-    float k = h / 398.0f;
+        {{55.2f, 77.5f}, {107.2f, 67.0f}, {107.8f, 124.2f}, {55.5f, 124.5f}},     // top-left
+        {{115.8f, 65.2f}, {200.5f, 49.5f}, {200.2f, 124.5f}, {115.8f, 124.2f}},   // top-right
+        {{55.8f, 131.8f}, {107.8f, 132.2f}, {107.2f, 188.8f}, {55.2f, 178.2f}},   // bottom-left
+        {{115.8f, 132.2f}, {200.0f, 131.8f}, {200.5f, 206.2f}, {115.8f, 195.5f}}}; // bottom-right
+    float k = h / 156.7f;
     for (int i = 0; i < 4; i++) {
         float X[4], Y[4];
-        for (int j = 0; j < 4; j++) { X[j] = cx + (P[i][j][0] - 277.0f) * k; Y[j] = cy + (P[i][j][1] - 276.0f) * k; }
+        for (int j = 0; j < 4; j++) { X[j] = cx + (P[i][j][0] - 127.9f) * k; Y[j] = cy + (P[i][j][1] - 127.9f) * k; }
         quad(X[0], Y[0], X[1], Y[1], X[2], Y[2], X[3], Y[3], c, a);
     }
 }
 static void winLogo(int cx, int cy, int s, Col c, int a = 255) { logoPanes((float)cx, (float)cy, (float)s, c, a); }
+// choose the font for a string: UI font normally, system font if the string has glyphs the UI font lacks
+static TTF_Font* pickFont(const std::string& s, int f, bool bold = false) {
+    TTF_Font* base = (bold && gFontB[f]) ? gFontB[f] : gFont[f];
+    if (!base || !gFontSys[f] || base == gFontSys[f]) return base;
+    bool ascii = true;
+    for (unsigned char ch : s) if (ch >= 0x80) { ascii = false; break; }
+    if (ascii) return base;
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i]; Uint32 cp = 0xFFFF; size_t n = 1;
+        if (c < 0x80) { cp = c; n = 1; }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) { cp = ((c & 0x1F) << 6) | (s[i + 1] & 0x3F); n = 2; }
+        else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) { cp = ((c & 0x0F) << 12) | ((s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F); n = 3; }
+        else if ((c & 0xF8) == 0xF0) n = 4;
+        if (cp < 0x10000 && cp >= 0x20 && !TTF_GlyphIsProvided(base, (Uint16)cp)) return gFontSys[f];
+        i += n;
+    }
+    return base;
+}
 static int tw(const std::string& s, int f) {
     int w = 0, h = 0;
-    if (gFont[f] && !s.empty()) TTF_SizeUTF8(gFont[f], s.c_str(), &w, &h);
+    TTF_Font* ft = pickFont(s, f);
+    if (ft && !s.empty()) TTF_SizeUTF8(ft, s.c_str(), &w, &h);
     return w;
 }
 // white text is cached; colour/alpha applied through texture mods. align: 0 left, 1 centre, 2 right
@@ -130,7 +156,7 @@ static void text(const std::string& s, int f, int x, int y, Col c, int align = 0
     auto it = gTC.find(key);
     if (it == gTC.end()) {
         SDL_Color white = {255, 255, 255, 255};
-        SDL_Surface* sf = TTF_RenderUTF8_Blended(gFont[f], s.c_str(), white);
+        SDL_Surface* sf = TTF_RenderUTF8_Blended(pickFont(s, f), s.c_str(), white);
         if (!sf) return;
         TT tt;
         tt.t = SDL_CreateTextureFromSurface(gR, sf);
@@ -152,10 +178,13 @@ static void text(const std::string& s, int f, int x, int y, Col c, int align = 0
 // styled text: style bits 1 bold, 2 italic, 4 underline (SDL_ttf synthesises them)
 static int twS(const std::string& s, int f, int style) {
     int w = 0, h = 0;
-    if (gFont[f] && !s.empty()) {
-        TTF_SetFontStyle(gFont[f], style);
-        TTF_SizeUTF8(gFont[f], s.c_str(), &w, &h);
-        TTF_SetFontStyle(gFont[f], 0);
+    bool rb = (style & 1) && gFontB[f];
+    TTF_Font* ft = pickFont(s, f, rb);
+    int st = (rb && ft == gFontB[f]) ? (style & ~1) : style;
+    if (ft && !s.empty()) {
+        TTF_SetFontStyle(ft, st);
+        TTF_SizeUTF8(ft, s.c_str(), &w, &h);
+        TTF_SetFontStyle(ft, 0);
     }
     return w;
 }
@@ -166,9 +195,12 @@ static void textS(const std::string& s, int f, int x, int y, Col c, int style, i
     auto it = gTC.find(key);
     if (it == gTC.end()) {
         SDL_Color white = {255, 255, 255, 255};
-        TTF_SetFontStyle(gFont[f], style);
-        SDL_Surface* sf = TTF_RenderUTF8_Blended(gFont[f], s.c_str(), white);
-        TTF_SetFontStyle(gFont[f], 0);
+        bool rb = (style & 1) && gFontB[f];
+        TTF_Font* ft = pickFont(s, f, rb);
+        int st = (rb && ft == gFontB[f]) ? (style & ~1) : style;
+        TTF_SetFontStyle(ft, st);
+        SDL_Surface* sf = TTF_RenderUTF8_Blended(ft, s.c_str(), white);
+        TTF_SetFontStyle(ft, 0);
         if (!sf) return;
         TT tt;
         tt.t = SDL_CreateTextureFromSurface(gR, sf);
@@ -266,14 +298,18 @@ static bool endsWith(const std::string& s, const std::string& e) { return s.size
 
 // ---------------------------------------------------------------- tiles / apps
 enum { A_MAIL, A_MUSIC, A_PHOTOS, A_DESKTOP, A_CALENDAR, A_STORE, A_CALC, A_NOTES, A_WEATHER, A_CLOCK, A_SETTINGS, A_POWER, A_GAMES, A_WORD, A_EXCEL,
-       A_BROWSER, A_PAINT, A_2048, A_MINES, A_SNAKE, A_TODO, A_FILES, A_TASKMGR, A_TIMER, A_COUNT };
+       A_BROWSER, A_PAINT, A_SOLITAIRE, A_2048, A_MINES, A_SNAKE, A_TODO, A_FILES, A_TASKMGR, A_TIMER, A_COUNT };
 
 // Apps that can be installed from the Store (all built in; "installing" adds a Start tile)
 struct SApp { int app; const char* name; const char* cat; const char* d1; const char* d2; Col col; int w; const char* glyph; int stars; const char* rate; };
 static const SApp STORE[] = {
-    {A_BROWSER, "CMrhoe", "Internet", "Amir's browser: search the web or type an address.", "Bookmarks, history and three search engines (DuckDuckGo, Google, Bing). Pages open in the Switch web engine, so you need Wi-Fi.", {219, 68, 55}, 2, "C", 5, "2,431"},
+    {A_BROWSER, "CMrhoe", "Internet", "Search the web or type an address.", "Bookmarks, history and three search engines (DuckDuckGo, Google, Bing). Pages open in the Switch web engine, so you need Wi-Fi.", {219, 68, 55}, 2, "C", 5, "2,431"},
     {A_WORD, "Word 2016", "Productivity", "Write letters and documents.", "Autosaves to your SD card. Bold, text size, word count.", {43, 87, 154}, 2, "W", 5, "9,812"},
     {A_PAINT, "Paint", "Art", "Draw with your finger.", "Brush, eraser, fill, line, rectangle and oval tools, 16 colours, undo. Save pictures you can open in Photos or put into Word.", {200, 70, 160}, 1, "P", 4, "5,320"},
+    {A_SOLITAIRE, "Solitaire", "Games", "The classic card game.", "Klondike. Drag cards or tap to auto-move, undo, draw 1 or 3. Your game is saved.", {20, 110, 60}, 1, "SO", 5, "21,386"},
+    {A_2048, "2048", "Games", "Swipe to merge tiles.", "Swipe or use the D-pad. Your board and best score are saved.", {237, 150, 50}, 1, "2048", 5, "12,904"},
+    {A_MINES, "Minesweeper", "Games", "Clear the board without hitting a mine.", "Tap to dig, switch to Flag mode to mark mines. The first tap is always safe.", {90, 100, 125}, 1, "M", 4, "8,477"},
+    {A_SNAKE, "Snake", "Games", "Swipe to steer, eat, grow.", "Swipe or use the D-pad. Your best score is saved.", {60, 150, 80}, 1, "SN", 4, "6,230"},
     {A_EXCEL, "Excel 2016", "Productivity", "Spreadsheets with formulas.", "SUM, AVERAGE, MIN, MAX, COUNT and cell references like =A1+B2. Autosaves.", {33, 115, 70}, 2, "X", 5, "7,104"},
 };
 static const int NSTORE = (int)(sizeof(STORE) / sizeof(STORE[0]));
@@ -285,8 +321,7 @@ static const Tile BASE[] = {
     {0, 0, 2, 1, {30, 144, 224}, "Mail", A_MAIL},
     {0, 1, 1, 1, {222, 89, 26}, "Music", A_MUSIC},
     {1, 1, 1, 1, {0, 150, 160}, "Photos", A_PHOTOS},
-    {0, 2, 1, 1, {236, 150, 10}, "Desktop", A_DESKTOP},
-    {1, 2, 1, 1, {110, 70, 215}, "Calendar", A_CALENDAR},
+    {0, 2, 2, 1, {110, 70, 215}, "Calendar", A_CALENDAR},
     {2, 0, 2, 2, {16, 160, 50}, "Store", A_STORE},
     {2, 2, 1, 1, {60, 140, 70}, "Calculator", A_CALC},
     {3, 2, 1, 1, {200, 35, 75}, "Notes", A_NOTES},
@@ -376,13 +411,16 @@ static Col appBg(int app) {
         case A_CLOCK: return Col{0, 84, 88};
         case A_SETTINGS: return Col{38, 38, 38};
         case A_POWER: return Col{27, 27, 27};
-        case A_DESKTOP: return Col{250, 170, 10};
         case A_PHOTOS: return Col{0, 0, 0};
         case A_WORD: return Col{43, 87, 154};
         case A_EXCEL: return Col{33, 115, 70};
         case A_STORE: return Col{0, 140, 0};
         case A_BROWSER: return Col{219, 68, 55};
         case A_PAINT: return Col{58, 58, 64};
+        case A_2048: return Col{250, 248, 239};
+        case A_SOLITAIRE: return Col{20, 110, 60};
+        case A_MINES: return Col{44, 48, 60};
+        case A_SNAKE: return Col{24, 34, 28};
         default: break;
     }
     for (auto& t : gTiles) if (t.app == app) return t.color;
@@ -679,6 +717,7 @@ static void wType(const std::string& t);
 static void wBack();
 static void appTouch(int phase, int x, int y);
 static void appUpdate(float dt);
+static void appKeys(u64 kd);
 static int kbTarget = 0; // 1 notes, 2 word, 3 excel cell, 4 browser address, 5 store search, 6 search charm
 static bool kbShift = false, kbSym = false;
 static int xRows() { int bottom = kbOpen ? KBTOP : UIH; return std::max(1, (bottom - XTOP) / XROWH); }
@@ -1115,6 +1154,294 @@ static void wScanPics() {
     std::sort(wPics.begin(), wPics.end(), [](const std::string& a, const std::string& b) { return a > b; });
     wPicScroll = 0;
 }
+
+// ---------------------------------------------------------------- 2048 / Minesweeper / Snake (state + logic)
+static int g2[4][4], g2score = 0, g2best = 0;
+static bool g2over = false, g2dirty = false;
+static int swX = 0, swY = 0;
+static void g2Save() {
+    std::string d = std::to_string(g2score) + " " + std::to_string(g2best) + " " + (g2over ? "1" : "0");
+    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) d += " " + std::to_string(g2[r][c]);
+    writeFile(DIR_ + "2048.dat", d);
+}
+static void g2Spawn() {
+    std::vector<int> e;
+    for (int i = 0; i < 16; i++) if (!g2[i / 4][i % 4]) e.push_back(i);
+    if (e.empty()) return;
+    int k = e[rand() % e.size()];
+    g2[k / 4][k % 4] = (rand() % 10 == 0) ? 4 : 2;
+}
+static bool g2CanMove() {
+    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
+        if (!g2[r][c]) return true;
+        if (r < 3 && g2[r][c] == g2[r + 1][c]) return true;
+        if (c < 3 && g2[r][c] == g2[r][c + 1]) return true;
+    }
+    return false;
+}
+static void g2New() {
+    memset(g2, 0, sizeof g2); g2score = 0; g2over = false;
+    g2Spawn(); g2Spawn(); g2dirty = true;
+}
+static void g2Load() {
+    memset(g2, 0, sizeof g2); g2score = 0; g2over = false;
+    std::string d; bool ok = false;
+    if (readFile(DIR_ + "2048.dat", d)) {
+        int v[19]; int n = 0; const char* p = d.c_str(); char* e;
+        while (n < 19) { long x = strtol(p, &e, 10); if (e == p) break; v[n++] = (int)x; p = e; }
+        if (n == 19) { g2score = v[0]; g2best = v[1]; g2over = v[2] != 0; for (int i = 0; i < 16; i++) g2[i / 4][i % 4] = v[3 + i]; ok = true; }
+    }
+    if (!ok) g2New();
+    g2dirty = false;
+}
+static void g2Move(int dir) { // 0 left 1 right 2 up 3 down
+    if (g2over) return;
+    bool moved = false;
+    for (int k = 0; k < 4; k++) {
+        int rr[4], cc[4];
+        for (int i = 0; i < 4; i++) {
+            if (dir == 0) { rr[i] = k; cc[i] = i; }
+            else if (dir == 1) { rr[i] = k; cc[i] = 3 - i; }
+            else if (dir == 2) { rr[i] = i; cc[i] = k; }
+            else { rr[i] = 3 - i; cc[i] = k; }
+        }
+        std::vector<int> v;
+        for (int i = 0; i < 4; i++) if (g2[rr[i]][cc[i]]) v.push_back(g2[rr[i]][cc[i]]);
+        std::vector<int> o;
+        for (size_t i = 0; i < v.size(); i++) {
+            if (i + 1 < v.size() && v[i] == v[i + 1]) { o.push_back(v[i] * 2); g2score += v[i] * 2; i++; }
+            else o.push_back(v[i]);
+        }
+        while (o.size() < 4) o.push_back(0);
+        for (int i = 0; i < 4; i++) { if (g2[rr[i]][cc[i]] != o[i]) moved = true; g2[rr[i]][cc[i]] = o[i]; }
+    }
+    if (!moved) return;
+    g2Spawn();
+    if (g2score > g2best) g2best = g2score;
+    if (!g2CanMove()) g2over = true;
+    g2dirty = true;
+}
+
+// Minesweeper
+static const int MCOLS = 16, MROWS = 9, MMINES = 22, MCELL = 60, MX0 = 160, MY0 = 104;
+struct MCell { bool mine = false, open = false, flag = false; int n = 0; };
+static MCell mc[MROWS][MCOLS];
+static int mState = 0; // 0 ready, 1 playing, 2 won, 3 lost
+static bool mFlagMode = false;
+static float mTime = 0;
+static void mNew() {
+    for (int r = 0; r < MROWS; r++) for (int c = 0; c < MCOLS; c++) mc[r][c] = MCell();
+    mState = 0; mTime = 0;
+}
+static int mFlags() { int n = 0; for (int r = 0; r < MROWS; r++) for (int c = 0; c < MCOLS; c++) if (mc[r][c].flag) n++; return n; }
+static void mPlace(int sr, int sc) {
+    int placed = 0;
+    while (placed < MMINES) {
+        int r = rand() % MROWS, c = rand() % MCOLS;
+        if (mc[r][c].mine || (abs(r - sr) <= 1 && abs(c - sc) <= 1)) continue;
+        mc[r][c].mine = true; placed++;
+    }
+    for (int r = 0; r < MROWS; r++) for (int c = 0; c < MCOLS; c++) {
+        int n = 0;
+        for (int dr = -1; dr <= 1; dr++) for (int dc = -1; dc <= 1; dc++) {
+            int a = r + dr, b = c + dc;
+            if (a >= 0 && b >= 0 && a < MROWS && b < MCOLS && mc[a][b].mine) n++;
+        }
+        mc[r][c].n = n;
+    }
+}
+static void mCheckWin() {
+    int closed = 0;
+    for (int r = 0; r < MROWS; r++) for (int c = 0; c < MCOLS; c++) if (!mc[r][c].open) closed++;
+    if (closed == MMINES) mState = 2;
+}
+static void mDig(int r, int c) {
+    if (mState >= 2 || mc[r][c].flag || mc[r][c].open) return;
+    if (mState == 0) { mPlace(r, c); mState = 1; }
+    if (mc[r][c].mine) {
+        mState = 3;
+        for (int a = 0; a < MROWS; a++) for (int b = 0; b < MCOLS; b++) if (mc[a][b].mine) mc[a][b].open = true;
+        return;
+    }
+    std::vector<int> st; st.push_back(r * MCOLS + c);
+    while (!st.empty()) {
+        int i = st.back(); st.pop_back();
+        int rr = i / MCOLS, cc = i % MCOLS;
+        if (mc[rr][cc].open || mc[rr][cc].flag) continue;
+        mc[rr][cc].open = true;
+        if (mc[rr][cc].n == 0)
+            for (int dr = -1; dr <= 1; dr++) for (int dc = -1; dc <= 1; dc++) {
+                int a = rr + dr, b = cc + dc;
+                if (a >= 0 && b >= 0 && a < MROWS && b < MCOLS && !mc[a][b].open) st.push_back(a * MCOLS + b);
+            }
+    }
+    mCheckWin();
+}
+
+// Snake
+static const int SCOLS = 30, SROWS = 16, SCELL = 36, SX0 = 100, SY0 = 76;
+static std::vector<std::pair<int, int>> snake;
+static int sDir = 0, sNext = 0, sState = 0, sScore = 0, sBest = 0, sFx = 0, sFy = 0; // dir 0 L 1 R 2 U 3 D
+static float sAcc = 0;
+static void snakeFood() {
+    for (int tries = 0; tries < 500; tries++) {
+        int x = rand() % SCOLS, y = rand() % SROWS; bool ok = true;
+        for (auto& b : snake) if (b.first == x && b.second == y) ok = false;
+        if (ok) { sFx = x; sFy = y; return; }
+    }
+}
+static void snakeNew() {
+    snake.clear();
+    for (int i = 0; i < 4; i++) snake.push_back({10 - i, 8});
+    sDir = sNext = 1; sState = 0; sScore = 0; sAcc = 0;
+    snakeFood();
+}
+static void snakeLoad() { std::string d; if (readFile(DIR_ + "snake.dat", d)) sBest = atoi(d.c_str()); snakeNew(); }
+static void snakeTurn(int d) {
+    if ((d == 0 && sDir == 1) || (d == 1 && sDir == 0) || (d == 2 && sDir == 3) || (d == 3 && sDir == 2)) return;
+    sNext = d;
+    if (sState == 0) sState = 1;
+}
+static void snakeStep() {
+    sDir = sNext;
+    int hx = snake[0].first + (sDir == 0 ? -1 : sDir == 1 ? 1 : 0), hy = snake[0].second + (sDir == 2 ? -1 : sDir == 3 ? 1 : 0);
+    bool dead = hx < 0 || hy < 0 || hx >= SCOLS || hy >= SROWS;
+    for (size_t i = 0; i + 1 < snake.size() && !dead; i++) if (snake[i].first == hx && snake[i].second == hy) dead = true;
+    if (dead) {
+        sState = 2;
+        if (sScore > sBest) { sBest = sScore; writeFile(DIR_ + "snake.dat", std::to_string(sBest)); }
+        return;
+    }
+    snake.insert(snake.begin(), {hx, hy});
+    if (hx == sFx && hy == sFy) { sScore++; snakeFood(); }
+    else snake.pop_back();
+}
+
+// ---------------------------------------------------------------- Solitaire (Klondike): state + rules
+struct SCard { int r, s; bool up; };   // rank 1..13, suit 0 spades 1 clubs 2 hearts 3 diamonds
+struct SolState { std::vector<SCard> stock, waste, found[4], tab[7]; int score, moves; };
+static SolState sol;
+static std::vector<SolState> solUndo;
+static int solDraw = 1;
+static bool solWon = false, solDirty = false, solDragging = false, solPressed = false;
+static Uint32 solStartT = 0;
+static const int SOLCW = 118, SOLCH = 160, SOLX0 = 137, SOLDX = 148, SOLY0 = 52, SOLTY = 236;
+static inline bool solRed(const SCard& c) { return c.s >= 2; }
+static bool solCanFound(const SCard& c) { return (int)sol.found[c.s].size() + 1 == c.r; }
+static bool solCanTab(const SCard& c, int col) {
+    const std::vector<SCard>& t = sol.tab[col];
+    if (t.empty()) return c.r == 13;
+    const SCard& b = t.back();
+    return b.up && b.r == c.r + 1 && solRed(b) != solRed(c);
+}
+static void solPush() { solUndo.push_back(sol); if (solUndo.size() > 60) solUndo.erase(solUndo.begin()); }
+static void solCheckWin() {
+    int n = 0; for (int i = 0; i < 4; i++) n += (int)sol.found[i].size();
+    solWon = (n == 52);
+}
+static void solNew() {
+    std::vector<SCard> d;
+    for (int s2 = 0; s2 < 4; s2++) for (int r = 1; r <= 13; r++) d.push_back(SCard{r, s2, false});
+    for (int i = 51; i > 0; i--) std::swap(d[i], d[rand() % (i + 1)]);
+    sol = SolState(); sol.score = 0; sol.moves = 0;
+    int k = 0;
+    for (int c = 0; c < 7; c++) for (int i = 0; i <= c; i++) { SCard x = d[k++]; x.up = (i == c); sol.tab[c].push_back(x); }
+    while (k < 52) sol.stock.push_back(d[k++]);
+    solUndo.clear(); solWon = false; solDirty = true; solStartT = SDL_GetTicks();
+}
+static std::string solSer() {
+    std::string d;
+    auto put = [&](const std::vector<SCard>& v) { for (auto& c : v) { d += std::to_string(c.r * 8 + c.s * 2 + (c.up ? 1 : 0)); d += ','; } d += '|'; };
+    put(sol.stock); put(sol.waste);
+    for (int i = 0; i < 4; i++) put(sol.found[i]);
+    for (int i = 0; i < 7; i++) put(sol.tab[i]);
+    d += std::to_string(sol.score) + "," + std::to_string(sol.moves) + "," + std::to_string(solDraw);
+    return d;
+}
+static void solLoad() {
+    std::string d;
+    bool ok = false;
+    if (readFile(DIR_ + "solitaire.dat", d)) {
+        std::vector<std::string> parts; std::string cur;
+        for (char c : d) { if (c == '|') { parts.push_back(cur); cur.clear(); } else cur += c; }
+        parts.push_back(cur);
+        if (parts.size() == 14) {
+            SolState t; t.score = t.moves = 0;
+            auto get = [&](const std::string& str, std::vector<SCard>& v) {
+                size_t a = 0;
+                while (a < str.size()) {
+                    size_t b = str.find(',', a); if (b == std::string::npos) break;
+                    int x = atoi(str.substr(a, b - a).c_str());
+                    v.push_back(SCard{x / 8, (x / 2) % 4, (x & 1) != 0}); a = b + 1;
+                }
+            };
+            get(parts[0], t.stock); get(parts[1], t.waste);
+            for (int i = 0; i < 4; i++) get(parts[2 + i], t.found[i]);
+            for (int i = 0; i < 7; i++) get(parts[6 + i], t.tab[i]);
+            int n = (int)(t.stock.size() + t.waste.size());
+            for (int i = 0; i < 4; i++) n += (int)t.found[i].size();
+            for (int i = 0; i < 7; i++) n += (int)t.tab[i].size();
+            int a1 = 0, a2 = 0, a3 = 1;
+            sscanf(parts[13].c_str(), "%d,%d,%d", &a1, &a2, &a3);
+            if (n == 52) { sol = t; sol.score = a1; sol.moves = a2; solDraw = (a3 == 3) ? 3 : 1; ok = true; solUndo.clear(); solCheckWin(); }
+        }
+    }
+    if (!ok) solNew();
+    solDirty = false;
+}
+static void solFlipTop(int col) {
+    std::vector<SCard>& t = sol.tab[col];
+    if (!t.empty() && !t.back().up) { t.back().up = true; sol.score += 5; }
+}
+static void solStockTap() {
+    solPush();
+    if (!sol.stock.empty()) {
+        for (int i = 0; i < solDraw && !sol.stock.empty(); i++) { SCard c = sol.stock.back(); sol.stock.pop_back(); c.up = true; sol.waste.push_back(c); }
+    } else if (!sol.waste.empty()) {
+        while (!sol.waste.empty()) { SCard c = sol.waste.back(); sol.waste.pop_back(); c.up = false; sol.stock.push_back(c); }
+        sol.score = std::max(0, sol.score - (solDraw == 1 ? 100 : 20));
+    } else { solUndo.pop_back(); return; }
+    sol.moves++; solDirty = true;
+}
+// src: 0 waste, 1 tableau (col, idx = first card of the run), 2 foundation slot (col)
+static bool solMove(int src, int col, int idx, int dstType, int dstCol) {
+    std::vector<SCard> run;
+    if (src == 0) { if (sol.waste.empty()) return false; run.push_back(sol.waste.back()); }
+    else if (src == 1) { if (idx < 0 || idx >= (int)sol.tab[col].size()) return false; run.assign(sol.tab[col].begin() + idx, sol.tab[col].end()); }
+    else { if (sol.found[col].empty()) return false; run.push_back(sol.found[col].back()); }
+    if (run.empty() || !run[0].up) return false;
+    bool ok = false;
+    if (dstType == 2) ok = (run.size() == 1) && solCanFound(run[0]) && !(src == 2);
+    else if (dstType == 1) ok = solCanTab(run[0], dstCol) && !(src == 1 && col == dstCol);
+    if (!ok) return false;
+    solPush();
+    if (src == 0) sol.waste.pop_back();
+    else if (src == 1) { sol.tab[col].erase(sol.tab[col].begin() + idx, sol.tab[col].end()); solFlipTop(col); }
+    else sol.found[col].pop_back();
+    if (dstType == 2) { sol.found[run[0].s].push_back(run[0]); sol.score += (src == 2 ? 0 : 10); }
+    else { for (auto& c : run) sol.tab[dstCol].push_back(c); if (src == 0) sol.score += 5; if (src == 2) sol.score = std::max(0, sol.score - 15); }
+    sol.moves++; solDirty = true; solCheckWin();
+    return true;
+}
+static bool solAuto(int src, int col, int idx) { // smart tap: foundation first, then any tableau column
+    SCard c;
+    if (src == 0) { if (sol.waste.empty()) return false; c = sol.waste.back(); }
+    else if (src == 1) { if (idx < 0 || idx >= (int)sol.tab[col].size()) return false; c = sol.tab[col][idx]; }
+    else return false;
+    if (!c.up) return false;
+    bool isTop = (src == 0) || (idx == (int)sol.tab[col].size() - 1);
+    if (isTop && solCanFound(c) && solMove(src, col, idx, 2, c.s)) return true;
+    for (int d = 0; d < 7; d++) {
+        if (src == 1 && d == col) continue;
+        if (solCanTab(c, d)) {
+            // don't shuffle a king that is already at the bottom of its column
+            if (src == 1 && c.r == 13 && idx == 0) continue;
+            if (solMove(src, col, idx, 1, d)) return true;
+        }
+    }
+    return false;
+}
+static void solUndoMove() { if (solUndo.empty()) return; sol = solUndo.back(); solUndo.pop_back(); solWon = false; solDirty = true; }
 // @@APPS_A@@
 // ---------------------------------------------------------------- autosave + app lifecycle
 static void saveAll() {
@@ -1122,6 +1449,8 @@ static void saveAll() {
     if (wDirty) { wSave(); wDirty = false; }
     if (xDirty) { writeFile(DIR_ + "sheet1.csv", sheetToCsv()); xDirty = false; }
     if (pDirty && !pDown) { paintSaveFile(DIR_ + "paint.bmp"); pDirty = false; }
+    if (g2dirty) { g2Save(); g2dirty = false; }
+    if (solDirty) { writeFile(DIR_ + "solitaire.dat", solSer()); solDirty = false; }
     // @@SAVE@@
 }
 static void appInit(int app) {
@@ -1146,6 +1475,10 @@ static void appInit(int app) {
         case A_BROWSER: loadHist(); brMsg.clear(); break;
         case A_SETTINGS: hbRefresh(); gHbMsg.clear(); gHbWhich = 0; break;
         case A_PAINT: paintLoad(); break;
+        case A_2048: g2Load(); break;
+        case A_MINES: mNew(); break;
+        case A_SNAKE: snakeLoad(); break;
+        case A_SOLITAIRE: solLoad(); solPressed = solDragging = false; break;
         // @@INIT@@
         default: break;
     }
@@ -1243,10 +1576,6 @@ static void drawIcon(int app, int cx, int cy, Col bg) {
             disc(cx + 14, cy - 8, 6, WHITE);
             line(cx - 26, cy + 16, cx - 6, cy - 4, 4, WHITE); line(cx - 6, cy - 4, cx + 8, cy + 10, 4, WHITE);
             break;
-        case A_DESKTOP:
-            outline(cx - 30, cy - 22, 60, 44, 4, WHITE);
-            rect(cx - 26, cy - 18, 52, 10, WHITE);
-            break;
         case A_STORE:
             ring(cx, cy - 8, 14, 5, WHITE, bg);
             rect(cx - 24, cy - 8, 48, 38, WHITE);
@@ -1283,6 +1612,21 @@ static void drawIcon(int app, int cx, int cy, Col bg) {
             disc(cx - 30, cy, 14, WHITE); disc(cx + 30, cy, 14, WHITE);
             rect(cx - 36, cy - 3, 16, 6, bg); rect(cx - 31, cy - 8, 6, 16, bg);
             disc(cx + 26, cy - 4, 3, bg); disc(cx + 34, cy + 4, 3, bg);
+            break;
+        case A_SOLITAIRE:
+            rect(cx - 26, cy - 30, 40, 56, WHITE); rect(cx - 8, cy - 22, 40, 56, WHITE, 255); outline(cx - 8, cy - 22, 40, 56, 2, bg);
+            disc(cx + 12, cy + 6, 9, bg);
+            break;
+        case A_2048:
+            text("2048", F30, cx, cy - 18, WHITE, 1);
+            break;
+        case A_MINES:
+            disc(cx, cy, 15, WHITE);
+            for (int k = 0; k < 8; k++) { float a = k * 0.785398f; line(cx + (int)(sinf(a) * 12), cy - (int)(cosf(a) * 12), cx + (int)(sinf(a) * 26), cy - (int)(cosf(a) * 26), 4, WHITE); }
+            break;
+        case A_SNAKE:
+            line(cx - 28, cy + 18, cx - 10, cy + 18, 10, WHITE); line(cx - 10, cy + 18, cx - 10, cy - 4, 10, WHITE);
+            line(cx - 10, cy - 4, cx + 22, cy - 4, 10, WHITE); disc(cx + 26, cy - 4, 9, WHITE); disc(cx + 28, cy - 7, 2, bg);
             break;
         case A_PAINT:
             line(cx - 26, cy + 24, cx + 20, cy - 22, 10, WHITE);
@@ -1363,19 +1707,6 @@ static void toggle(int x, int y, bool on, Col accent) {
 }
 static void appTitle(const char* s) { text(s, F72, 70, 34, WHITE); }
 static int areaBottom() { return kbOpen ? KBTOP : UIH; }
-
-struct Chip { int app; SDL_Rect r; };
-static std::vector<Chip> deskChips() {
-    std::vector<Chip> v;
-    int x = 140;
-    for (int a = 0; a < A_COUNT; a++) {
-        if (!running[a] || a == A_DESKTOP) continue;
-        Chip c; c.app = a; c.r.x = x; c.r.y = UIH - 36; c.r.w = 130; c.r.h = 32;
-        v.push_back(c); x += 136;
-    }
-    return v;
-}
-
 
 // ---------------------------------------------------------------- Store (Windows 8.1 look)
 static const Col STG = {0, 138, 0};            // store green
@@ -1559,7 +1890,7 @@ static void storeTap(int x, int y) {
     }
 }
 
-// ---------------------------------------------------------------- CMrhoe (Amir's browser)
+// ---------------------------------------------------------------- CMrhoe browser
 struct Bm { const char* name; const char* url; Col c; };
 static const Bm BMS[8] = {
     {"DuckDuckGo", "https://duckduckgo.com", {222, 88, 51}},
@@ -1629,7 +1960,7 @@ static void drawBrowser(int bottom) {
     ring(62, 50, 20, 4, WHITE, red);
     rect(42, 48, 40, 3, WHITE); rect(61, 30, 3, 40, WHITE);
     text("CMrhoe", F44, 96, 22, WHITE);
-    text("Amir's browser", F16, 290, 44, WHITE, 0, 200);
+    
     // address bar
     rect(70, 112, 920, 58, WHITE);
     outline(70, 112, 920, 58, 2, kbOpen && kbTarget == 4 ? red : Col{170, 170, 170});
@@ -1996,10 +2327,297 @@ static void wordTap(int x, int y) {
         openKb(2); wFollow = true;
     }
 }
+
+// ---------------------------------------------------------------- 2048 / Minesweeper / Snake (UI)
+static Col g2Col(int v) {
+    switch (v) {
+        case 0: return Col{205, 193, 180}; case 2: return Col{238, 228, 218}; case 4: return Col{237, 224, 200};
+        case 8: return Col{242, 177, 121}; case 16: return Col{245, 149, 99}; case 32: return Col{246, 124, 95};
+        case 64: return Col{246, 94, 59}; case 128: return Col{237, 207, 114}; case 256: return Col{237, 204, 97};
+        case 512: return Col{237, 200, 80}; case 1024: return Col{237, 197, 63}; default: return Col{237, 194, 46};
+    }
+}
+static void draw2048() {
+    rect(0, 0, W, UIH, Col{250, 248, 239});
+    text("2048", F72, 70, 50, Col{119, 110, 101});
+    rect(70, 170, 220, 90, Col{187, 173, 160}); text("SCORE", F16, 180, 180, Col{238, 228, 218}, 1); text(std::to_string(g2score), F44, 180, 204, WHITE, 1);
+    rect(70, 280, 220, 90, Col{187, 173, 160}); text("BEST", F16, 180, 290, Col{238, 228, 218}, 1); text(std::to_string(g2best), F44, 180, 314, WHITE, 1);
+    btn(70, 400, 220, 60, "New game", Col{143, 122, 102}, WHITE);
+    text("Swipe on the board", F16, 70, 480, Col{150, 140, 130});
+    text("or use the D-pad", F16, 70, 504, Col{150, 140, 130});
+    int bx = 370, by = 100;
+    rect(bx, by, 540, 540, Col{187, 173, 160});
+    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
+        int v = g2[r][c], x = bx + 12 + c * 132, y = by + 12 + r * 132;
+        rect(x, y, 120, 120, g2Col(v));
+        if (v) text(std::to_string(v), v >= 1000 ? F30 : F44, x + 60, y + (v >= 1000 ? 42 : 36), v <= 4 ? Col{119, 110, 101} : WHITE, 1);
+    }
+    if (g2over) { rect(bx, by, 540, 540, Col{238, 228, 218}, 190); text("Game over", F72, bx + 270, by + 220, Col{119, 110, 101}, 1); }
+}
+static void tap2048(int x, int y) { if (inR(x, y, 70, 400, 220, 60)) g2New(); }
+static int swipeOf(int x, int y, int minD) {
+    int dx = x - swX, dy = y - swY;
+    if (abs(dx) < minD && abs(dy) < minD) return -1;
+    if (abs(dx) > abs(dy)) return dx < 0 ? 0 : 1;
+    return dy < 0 ? 2 : 3;
+}
+static Col mNumCol(int n) {
+    static const Col C[9] = {{0, 0, 0}, {80, 150, 255}, {70, 200, 110}, {240, 90, 90}, {120, 120, 255}, {220, 110, 70}, {60, 200, 200}, {240, 240, 240}, {180, 180, 180}};
+    return C[n];
+}
+static void drawMines() {
+    rect(0, 0, W, UIH, Col{44, 48, 60});
+    char b[48];
+    snprintf(b, sizeof b, "Mines  %d", MMINES - mFlags());
+    text(b, F30, MX0, 52, WHITE);
+    snprintf(b, sizeof b, "%d s", (int)mTime);
+    text(b, F30, W / 2, 52, WHITE, 1);
+    btn(830, 46, 150, 48, mFlagMode ? "Flag" : "Dig", mFlagMode ? Col{200, 120, 20} : Col{40, 130, 190}, WHITE);
+    btn(990, 46, 130, 48, "New", Col{90, 100, 125}, WHITE);
+    for (int r = 0; r < MROWS; r++) for (int c = 0; c < MCOLS; c++) {
+        const MCell& m = mc[r][c];
+        int x = MX0 + c * MCELL, y = MY0 + r * MCELL;
+        if (m.open) {
+            rect(x, y, MCELL - 2, MCELL - 2, m.mine ? Col{170, 40, 40} : Col{28, 31, 40});
+            if (m.mine) disc(x + 29, y + 29, 12, WHITE);
+            else if (m.n) text(std::to_string(m.n), F30, x + 29, y + 12, mNumCol(m.n), 1);
+        } else {
+            rect(x, y, MCELL - 2, MCELL - 2, Col{104, 116, 146});
+            rect(x, y, MCELL - 2, 4, Col{140, 152, 182});
+            if (m.flag) { rect(x + 28, y + 12, 4, 30, WHITE); tri((float)x + 30, y + 12.0f, x + 30.0f, y + 28.0f, x + 46.0f, y + 20.0f, Col{240, 80, 70}); }
+        }
+    }
+    if (mState >= 2) {
+        rect(MX0, MY0 + 200, MCOLS * MCELL, 100, Col{0, 0, 0}, 170);
+        text(mState == 2 ? "You win!" : "Boom! Game over", F72, W / 2, MY0 + 206, mState == 2 ? Col{120, 230, 140} : Col{240, 110, 100}, 1);
+    }
+}
+static void tapMines(int x, int y) {
+    if (inR(x, y, 830, 46, 150, 48)) { mFlagMode = !mFlagMode; return; }
+    if (inR(x, y, 990, 46, 130, 48)) { mNew(); return; }
+    int c = (x - MX0) / MCELL, r = (y - MY0) / MCELL;
+    if (x < MX0 || y < MY0 || c >= MCOLS || r >= MROWS) return;
+    if (mState >= 2) return;
+    if (mFlagMode) { if (!mc[r][c].open) mc[r][c].flag = !mc[r][c].flag; }
+    else if (mc[r][c].open && mc[r][c].n > 0) { // chord: dig neighbours if flags match
+        int f = 0;
+        for (int dr = -1; dr <= 1; dr++) for (int dc = -1; dc <= 1; dc++) { int a = r + dr, b = c + dc; if (a >= 0 && b >= 0 && a < MROWS && b < MCOLS && mc[a][b].flag) f++; }
+        if (f == mc[r][c].n)
+            for (int dr = -1; dr <= 1; dr++) for (int dc = -1; dc <= 1; dc++) { int a = r + dr, b = c + dc; if (a >= 0 && b >= 0 && a < MROWS && b < MCOLS) mDig(a, b); }
+    } else mDig(r, c);
+}
+static void drawSnake() {
+    rect(0, 0, W, UIH, Col{24, 34, 28});
+    text("Score " + std::to_string(sScore), F30, 100, 40, WHITE);
+    text("Best " + std::to_string(sBest), F30, 400, 40, WHITE, 0, 200);
+    btn(1060, 38, 120, 44, "New", Col{60, 150, 80}, WHITE);
+    rect(SX0, SY0, SCOLS * SCELL, SROWS * SCELL, Col{34, 48, 38});
+    for (size_t i = 0; i < snake.size(); i++) {
+        int x = SX0 + snake[i].first * SCELL, y = SY0 + snake[i].second * SCELL;
+        rect(x + 2, y + 2, SCELL - 4, SCELL - 4, i == 0 ? Col{150, 240, 120} : Col{80, 190, 90});
+    }
+    disc(SX0 + sFx * SCELL + SCELL / 2, SY0 + sFy * SCELL + SCELL / 2, SCELL / 2 - 4, Col{235, 70, 70});
+    outline(SX0 - 2, SY0 - 2, SCOLS * SCELL + 4, SROWS * SCELL + 4, 2, Col{90, 140, 100});
+    if (sState == 0) text("Swipe to start", F44, W / 2, SY0 + 230, WHITE, 1);
+    if (sState == 2) { rect(SX0, SY0 + 200, SCOLS * SCELL, 120, Col{0, 0, 0}, 160); text("Game over", F72, W / 2, SY0 + 205, Col{240, 110, 100}, 1); }
+}
+static void tapSnake(int x, int y) { if (inR(x, y, 1060, 38, 120, 44)) snakeNew(); }
+
+// ---------------------------------------------------------------- Solitaire (UI)
+static void drawSuit(int su, int cx, int cy, int z, Col c) {
+    switch (su) {
+        case 2:
+            disc(cx - z / 2, cy - z / 4, z / 2 + 1, c); disc(cx + z / 2, cy - z / 4, z / 2 + 1, c);
+            tri((float)cx - z - 1, (float)cy - z / 8, (float)cx + z + 1, (float)cy - z / 8, (float)cx, (float)cy + z, c); break;
+        case 3: quad((float)cx, (float)cy - z, cx + z * 0.72f, (float)cy, (float)cx, (float)cy + z, cx - z * 0.72f, (float)cy, c); break;
+        case 0:
+            tri((float)cx - z - 1, (float)cy + z / 4, (float)cx + z + 1, (float)cy + z / 4, (float)cx, (float)cy - z, c);
+            disc(cx - z / 2, cy + z / 4, z / 2 + 1, c); disc(cx + z / 2, cy + z / 4, z / 2 + 1, c);
+            tri((float)cx, (float)cy, cx - z / 3.0f, (float)cy + z, cx + z / 3.0f, (float)cy + z, c); break;
+        default:
+            disc(cx, cy - z / 2, z / 2 + 1, c); disc(cx - z / 2, cy + z / 5, z / 2 + 1, c); disc(cx + z / 2, cy + z / 5, z / 2 + 1, c);
+            tri((float)cx, (float)cy, cx - z / 3.0f, (float)cy + z, cx + z / 3.0f, (float)cy + z, c); break;
+    }
+}
+static std::string solRank(int r) {
+    switch (r) { case 1: return "A"; case 11: return "J"; case 12: return "Q"; case 13: return "K"; default: break; }
+    return std::to_string(r);
+}
+static void drawCard(int x, int y, const SCard& c) {
+    rect(x + 2, y + 3, SOLCW, SOLCH, BLACK, 60);
+    if (!c.up) {
+        rect(x, y, SOLCW, SOLCH, WHITE);
+        rect(x + 6, y + 6, SOLCW - 12, SOLCH - 12, Col{34, 70, 160});
+        for (int i = 0; i < 9; i++) { line(x + 6, y + 6 + i * 18, x + 6 + std::min(SOLCW - 12, (i + 1) * 18), y + 6, 1, Col{90, 130, 220}, 160); }
+        outline(x + 6, y + 6, SOLCW - 12, SOLCH - 12, 2, Col{150, 180, 240});
+        return;
+    }
+    rect(x, y, SOLCW, SOLCH, Col{252, 252, 248});
+    outline(x, y, SOLCW, SOLCH, 1, Col{170, 170, 170});
+    Col ink = solRed(c) ? Col{200, 30, 40} : Col{30, 30, 30};
+    textS(solRank(c.r), F30, x + 8, y + 2, ink, 1);
+    drawSuit(c.s, x + 20, y + 52, 9, ink);
+    if (c.r >= 11) {
+        text(solRank(c.r), F72, x + SOLCW / 2 + 10, y + 40, ink, 1, 230);
+        drawSuit(c.s, x + SOLCW - 24, y + SOLCH - 26, 10, ink);
+    } else drawSuit(c.s, x + SOLCW / 2 + 6, y + SOLCH / 2 + 10, c.r == 1 ? 28 : 20, ink);
+}
+// fan-out offsets for a tableau column so even long columns fit on screen
+static void solOffsets(int col, std::vector<int>& off) {
+    const std::vector<SCard>& t = sol.tab[col];
+    off.assign(t.size(), 0);
+    float down = 18, up = 42, total = 0;
+    for (size_t i = 0; i + 1 < t.size(); i++) total += t[i].up ? up : down;
+    float avail = (float)(UIH - SOLTY - SOLCH - 8);
+    float k = (total > avail && total > 0) ? avail / total : 1.0f;
+    int y = 0;
+    for (size_t i = 0; i < t.size(); i++) { off[i] = y; y += (int)((t[i].up ? up : down) * k); }
+}
+static int solColX(int c) { return SOLX0 + c * SOLDX; }
+static int solSrc = -1, solSCol = 0, solSIdx = 0, solDX = 0, solDY = 0, solGX = 0, solGY = 0, solPX = 0, solPY = 0;
+static bool solHit(int x, int y, int& src, int& col, int& idx) {
+    // waste
+    if (!sol.waste.empty() && inR(x, y, solColX(1), SOLY0, SOLCW, SOLCH)) { src = 0; col = 0; idx = (int)sol.waste.size() - 1; return true; }
+    for (int f = 0; f < 4; f++) if (!sol.found[f].empty() && inR(x, y, solColX(3 + f), SOLY0, SOLCW, SOLCH)) { src = 2; col = f; idx = (int)sol.found[f].size() - 1; return true; }
+    for (int c = 0; c < 7; c++) {
+        std::vector<int> off; solOffsets(c, off);
+        for (int i = (int)off.size() - 1; i >= 0; i--) {
+            int h = (i == (int)off.size() - 1) ? SOLCH : std::max(18, (i + 1 < (int)off.size() ? off[i + 1] - off[i] : SOLCH));
+            if (inR(x, y, solColX(c), SOLTY + off[i], SOLCW, h)) { src = 1; col = c; idx = i; return true; }
+        }
+    }
+    return false;
+}
+static void solTouch(int ph, int x, int y) {
+    if (ph == 0) {
+        solPressed = true; solDragging = false; solSrc = -1; solPX = x; solPY = y;
+        if (x >= 1150) return;
+        int s2, c2, i2;
+        if (!solWon && solHit(x, y, s2, c2, i2)) {
+            bool up = (s2 == 0) ? sol.waste.back().up : (s2 == 2 ? true : sol.tab[c2][i2].up);
+            if (up) { solSrc = s2; solSCol = c2; solSIdx = i2; solGX = x - (s2 == 0 ? solColX(1) : (s2 == 2 ? solColX(3 + c2) : solColX(c2))); solGY = 0; }
+            else solSrc = 100 + c2; // face-down card: tap flips if it is the top one
+            if (solSrc < 100) {
+                int top = (s2 == 0) ? SOLY0 : (s2 == 2 ? SOLY0 : 0);
+                if (s2 == 1) { std::vector<int> off; solOffsets(c2, off); top = SOLTY + off[i2]; }
+                solGY = y - top;
+            }
+        }
+    } else if (ph == 1 && solPressed && solSrc >= 0 && solSrc < 100) {
+        if (!solDragging && (abs(x - solPX) > 14 || abs(y - solPY) > 14)) solDragging = true;
+        solDX = x; solDY = y;
+    } else if (ph == 2 && solPressed) {
+        solPressed = false;
+        bool moved = abs(x - solPX) > 14 || abs(y - solPY) > 14;
+        if (solDragging && solSrc >= 0 && solSrc < 100) {
+            solDragging = false;
+            int cx0 = x - solGX + SOLCW / 2, cy0 = y - solGY;
+            // drop on foundation?
+            bool done = false;
+            if (cy0 < SOLTY - 20) {
+                for (int f = 0; f < 4 && !done; f++) if (cx0 >= solColX(3 + f) - 40 && cx0 < solColX(3 + f) + SOLCW + 40) done = solMove(solSrc, solSCol, solSIdx, 2, f);
+            } else {
+                int best = -1, bd = 99999;
+                for (int c = 0; c < 7; c++) { int d = abs(cx0 - (solColX(c) + SOLCW / 2)); if (d < bd) { bd = d; best = c; } }
+                if (best >= 0 && bd < SOLCW) done = solMove(solSrc, solSCol, solSIdx, 1, best);
+            }
+            (void)done;
+            return;
+        }
+        solDragging = false;
+        if (moved) return;
+        // ---- taps
+        if (x >= 1150) {
+            if (inR(x, y, 1152, 60, 118, 48)) { solNew(); }
+            else if (inR(x, y, 1152, 120, 118, 48)) { solUndoMove(); }
+            else if (inR(x, y, 1152, 180, 118, 48)) { solDraw = (solDraw == 1) ? 3 : 1; solDirty = true; }
+            return;
+        }
+        if (solWon) { if (inR(x, y, 440, 300, 400, 80)) solNew(); return; }
+        if (inR(x, y, solColX(0), SOLY0, SOLCW, SOLCH)) { solStockTap(); return; }
+        if (solSrc >= 100) {
+            int c = solSrc - 100;
+            if (!sol.tab[c].empty() && !sol.tab[c].back().up && solHit(x, y, solSrc, solSCol, solSIdx) && solSIdx == (int)sol.tab[c].size() - 1) {
+                solPush(); solFlipTop(c); sol.moves++; solDirty = true;
+            }
+            return;
+        }
+        if (solSrc >= 0) solAuto(solSrc, solSCol, solSIdx);
+    } else if (ph == 2) { solPressed = false; solDragging = false; }
+}
+static void drawSolitaire() {
+    for (int y = 0; y < UIH; y += 6) rect(0, y, W, 6, mix(Col{24, 124, 70}, Col{12, 82, 46}, y / (float)UIH));
+    // empty slots
+    rect(solColX(0), SOLY0, SOLCW, SOLCH, WHITE, 24); outline(solColX(0), SOLY0, SOLCW, SOLCH, 2, Col{255, 255, 255});
+    rect(solColX(1), SOLY0, SOLCW, SOLCH, WHITE, 16);
+    for (int f = 0; f < 4; f++) {
+        rect(solColX(3 + f), SOLY0, SOLCW, SOLCH, WHITE, 24);
+        drawSuit(f, solColX(3 + f) + SOLCW / 2, SOLY0 + SOLCH / 2, 24, Col{255, 255, 255});
+        rect(solColX(3 + f) + 8, SOLY0 + 8, SOLCW - 16, SOLCH - 16, Col{12, 82, 46}, 70);
+    }
+    for (int c = 0; c < 7; c++) rect(solColX(c), SOLTY, SOLCW, SOLCH, BLACK, 40);
+    if (sol.stock.empty()) { ring(solColX(0) + SOLCW / 2, SOLY0 + SOLCH / 2, 26, 6, Col{255, 255, 255}, Col{20, 100, 58}); }
+    else drawCard(solColX(0), SOLY0, sol.stock.back());
+    if (!sol.waste.empty()) {
+        int n = (solDraw == 3) ? std::min<int>(3, sol.waste.size()) : 1;
+        for (int i = 0; i < n; i++) {
+            int idx = (int)sol.waste.size() - n + i;
+            bool dragThis = solDragging && solSrc == 0 && idx == (int)sol.waste.size() - 1;
+            if (!dragThis) drawCard(solColX(1) + i * 26, SOLY0, sol.waste[idx]);
+        }
+    }
+    for (int f = 0; f < 4; f++) {
+        const std::vector<SCard>& fp = sol.found[f];
+        if (fp.empty()) continue;
+        bool dragThis = solDragging && solSrc == 2 && solSCol == f;
+        if (fp.size() >= 2 && dragThis) drawCard(solColX(3 + f), SOLY0, fp[fp.size() - 2]);
+        else if (!dragThis) drawCard(solColX(3 + f), SOLY0, fp.back());
+    }
+    for (int c = 0; c < 7; c++) {
+        std::vector<int> off; solOffsets(c, off);
+        for (int i = 0; i < (int)off.size(); i++) {
+            if (solDragging && solSrc == 1 && solSCol == c && i >= solSIdx) break;
+            drawCard(solColX(c), SOLTY + off[i], sol.tab[c][i]);
+        }
+    }
+    // dragged cards follow the finger
+    if (solDragging && solSrc >= 0 && solSrc < 100) {
+        int bx = solDX - solGX, by = solDY - solGY;
+        if (solSrc == 0) drawCard(bx, by, sol.waste.back());
+        else if (solSrc == 2) drawCard(bx, by, sol.found[solSCol].back());
+        else {
+            std::vector<int> off; solOffsets(solSCol, off);
+            for (int i = solSIdx; i < (int)sol.tab[solSCol].size(); i++) drawCard(bx, by + (off[i] - off[solSIdx]), sol.tab[solSCol][i]);
+        }
+    }
+    // side panel
+    btn(1152, 60, 118, 48, "New", Col{14, 90, 50}, WHITE);
+    btn(1152, 120, 118, 48, "Undo", solUndo.empty() ? Col{40, 110, 70} : Col{14, 90, 50}, WHITE);
+    btn(1152, 180, 118, 48, solDraw == 1 ? "Draw 1" : "Draw 3", Col{14, 90, 50}, WHITE);
+    text("Score", F16, 1211, 256, WHITE, 1, 200); text(std::to_string(sol.score), F30, 1211, 276, WHITE, 1);
+    text("Moves", F16, 1211, 320, WHITE, 1, 200); text(std::to_string(sol.moves), F30, 1211, 340, WHITE, 1);
+    if (solWon) {
+        float t = (SDL_GetTicks() - solStartT) / 1000.0f;
+        for (int i = 0; i < 40; i++) {
+            float ph = fmodf(t * (0.4f + (i % 5) * 0.15f) + i * 0.137f, 1.0f);
+            Col cc = (i % 3 == 0) ? Col{255, 210, 60} : (i % 3 == 1) ? Col{255, 255, 255} : Col{120, 220, 150};
+            rect((i * 97) % (W - 20), (int)(ph * UIH), 12, 12, cc, 220);
+        }
+        rect(340, 250, 600, 180, BLACK, 170);
+        text("You win!", F72, W / 2, 262, WHITE, 1);
+        btn(440, 350, 400, 60, "Play again", Col{20, 140, 80}, WHITE);
+    }
+}
 // @@APPS_B@@
 static void appTouch(int phase, int x, int y) {
     switch (curApp) {
         case A_PAINT: paintTouch(phase, x, y); break;
+        case A_2048: if (phase == 0) { swX = x; swY = y; } else if (phase == 2) { int d = swipeOf(x, y, 50); if (d >= 0) g2Move(d); } break;
+        case A_SNAKE:
+            if (phase == 0) { swX = x; swY = y; }
+            else if (phase == 1) { int d = swipeOf(x, y, 36); if (d >= 0) { snakeTurn(d); swX = x; swY = y; } }
+            break;
+        case A_SOLITAIRE: solTouch(phase, x, y); break;
         // @@TOUCH@@
         default: break;
     }
@@ -2101,7 +2719,21 @@ static void hbOpenOriginal() {
 static void settingsTap(int x, int y, const Theme& th);
 static void appUpdate(float dt) {
     if (gHbConfirm > 0) { gHbConfirm -= dt; if (gHbConfirm <= 0) gHbWhich = 0; }
+    if (curApp == A_MINES && appDir == 0 && mState == 1) mTime += dt;
+    if (curApp == A_SNAKE && appDir == 0 && sState == 1) {
+        sAcc += dt;
+        float stepT = std::max(0.07f, 0.14f - sScore * 0.003f);
+        while (sAcc >= stepT && sState == 1) { sAcc -= stepT; snakeStep(); }
+    }
     // @@UPDATE@@
+}
+static void appKeys(u64 kd) {
+    int d = -1;
+    if (kd & HidNpadButton_AnyLeft) d = 0; else if (kd & HidNpadButton_AnyRight) d = 1;
+    else if (kd & HidNpadButton_AnyUp) d = 2; else if (kd & HidNpadButton_AnyDown) d = 3;
+    if (curApp == A_2048 && d >= 0) g2Move(d);
+    if (curApp == A_SNAKE && d >= 0) snakeTurn(d);
+    // @@KEYS@@
 }
 static void drawApp() {
     const Theme& th = THEMES[gTheme];
@@ -2201,30 +2833,6 @@ static void drawApp() {
             text("Open original hbmenu", F44, 480, 402, WHITE, 1);
             break;
         }
-        case A_DESKTOP: {
-            for (int y = 0; y < UIH; y += 6) rect(0, y, W, 6, mix(Col{255, 190, 8}, Col{246, 160, 4}, y / (float)UIH));
-            tri(0, 190, 260, 440, 0, 620, Col{232, 124, 6});
-            tri(0, 190, 120, 330, 0, 420, Col{244, 150, 12});
-            tri(520, 628, 575, 420, 600, 628, Col{222, 138, 10});
-            tri(575, 420, 960, 628, 600, 628, Col{238, 228, 208});
-            rect(36, 66, 36, 6, Col{207, 216, 220});
-            rect(40, 74, 28, 36, Col{207, 216, 220});
-            text("Recycle Bin", F16, 54, 118, WHITE, 1);
-            rect(0, UIH - 40, W, 40, Col{28, 28, 28}, 238);
-            disc(50, UIH - 20, 14, Col{27, 161, 226});
-            text("e", F22, 50, UIH - 34, WHITE, 1);
-            rect(88, UIH - 30, 30, 20, Col{250, 200, 60});
-            rect(88, UIH - 34, 14, 6, Col{250, 200, 60});
-            for (auto& c : deskChips()) {
-                rect(c.r.x, c.r.y, c.r.w, c.r.h, Col{70, 70, 78});
-                rect(c.r.x, c.r.y + c.r.h - 3, c.r.w, 3, appBg(c.app));
-                text(appName(c.app), F16, c.r.x + c.r.w / 2, c.r.y + 5, WHITE, 1);
-            }
-            text(timeStr(), F16, W - 14, UIH - 38, WHITE, 2);
-            char d[24]; snprintf(d, sizeof d, "%02d/%02d/%d", gNow.d, gNow.mo, gNow.y);
-            text(d, F16, W - 14, UIH - 20, WHITE, 2, 200);
-            break;
-        }
         case A_NOTES: {
             rect(0, 0, W, UIH, bg);
             text("Notes", F44, 70, 40, WHITE);
@@ -2286,6 +2894,10 @@ static void drawApp() {
         case A_STORE: drawStore(th, bottom); break;
         case A_BROWSER: drawBrowser(bottom); break;
         case A_PAINT: drawPaint(); break;
+        case A_2048: draw2048(); break;
+        case A_MINES: drawMines(); break;
+        case A_SNAKE: drawSnake(); break;
+        case A_SOLITAIRE: drawSolitaire(); break;
         // @@DRAW@@
         case A_PHOTOS: {
             rect(0, 0, W, UIH, BLACK);
@@ -2386,10 +2998,6 @@ static void appTap(int x, int y) {
             else if (inR(x, y, 630, 260, 260, 90)) closeApp(false);
             else if (inR(x, y, 70, 380, 820, 90)) hbOpenOriginal();
             break;
-        case A_DESKTOP:
-            for (auto& c : deskChips())
-                if (inR(x, y, c.r.x, c.r.y, c.r.w, c.r.h)) { pendingTile = tileIndexFor(c.app); closeApp(false); return; }
-            break;
         case A_NOTES:
             if (inR(x, y, 1110, 42, 100, 42)) { backupFile(DIR_ + "notes.txt"); gNote.s.clear(); gNote.dirty = true; }
             else if (inR(x, y, 70, 100, 1140, areaBottom() - 116)) openKb(1);
@@ -2415,6 +3023,9 @@ static void appTap(int x, int y) {
         case A_STORE: storeTap(x, y); break;
         case A_BROWSER: browserTap(x, y); break;
         case A_PAINT: paintTap(x, y); break;
+        case A_2048: tap2048(x, y); break;
+        case A_MINES: tapMines(x, y); break;
+        case A_SNAKE: tapSnake(x, y); break;
         // @@TAP@@
         case A_PHOTOS:
             if (x < W / 3) photoNav(-1);
@@ -2452,7 +3063,7 @@ static void appDrag(int dx, int dy) {
 
 // ---------------------------------------------------------------- boot animation, lock screen, charms, switcher
 static SDL_Texture* gLockTex = nullptr;
-static const float BOOT_END = 4.3f;
+static const float BOOT_END = 3.9f;
 static void fdisc(float cx, float cy, float r, Col c) {
     const int N = 120;
     SDL_Vertex v[N + 1];
@@ -2513,34 +3124,23 @@ static void lockInit() {
     }
     SDL_SetRenderTarget(gR, nullptr);
 }
+static SDL_Texture* gBootTex = nullptr;
+static int gBootIdx = -1;
 static void drawBoot(float t) {
-    Col bg = {252, 252, 255}, lb = {0, 164, 239}, pane = {102, 211, 255};
-    rect(0, 0, W, UIH, bg);
-    float cx = W / 2.0f, cy = UIH / 2.0f;
-    if (t < 1.5f) {
-        float u = ease(t / 1.4f);
-        float S = 640.0f + (150.0f - 640.0f) * u;
-        float pa = 1.0f - clampf((t - 0.45f) / 0.6f, 0, 1);
-        if (pa > 0) {
-            float k = (UIH / 338.0f) * (1.0f - 0.55f * u);
-            static const float Q[4][2] = {{-42, -59}, {114, -159}, {114, 157}, {-42, 59}};
-            quad(cx + Q[0][0] * k, cy + Q[0][1] * k, cx + Q[1][0] * k, cy + Q[1][1] * k,
-                 cx + Q[2][0] * k, cy + Q[2][1] * k, cx + Q[3][0] * k, cy + Q[3][1] * k, pane, (int)(pa * 255));
+    // plays the supplied boot GIF frame by frame (100 ms per frame), decoded on demand
+    int idx = std::max(0, std::min(BOOT_NFRAMES - 1, (int)(t / 0.1f)));
+    if (idx != gBootIdx) {
+        int u = BOOT_FRAME_MAP[idx];
+        SDL_Surface* sf = IMG_Load_RW(SDL_RWFromConstMem(BOOT_UNIQUE[u].d, (int)BOOT_UNIQUE[u].n), 1);
+        if (sf) {
+            if (gBootTex) SDL_DestroyTexture(gBootTex);
+            gBootTex = SDL_CreateTextureFromSurface(gR, sf);
+            SDL_FreeSurface(sf);
         }
-        logoPanes(cx, cy, S, lb, (int)(clampf((t - 0.35f) / 0.7f, 0, 1) * 255));
-    } else {
-        float s2 = ease((t - 1.5f) / 0.8f);
-        int textW = tw("WinNX", F72);
-        float logoH = 150, logoW = logoH * 364.0f / 398.0f, gap = 28;
-        float total = logoW + gap + textW;
-        float fin = cx - total / 2 + logoW / 2;
-        float lx = cx + (fin - cx) * s2;
-        logoPanes(lx, cy, logoH, lb, 255);
-        text("WinNX", F72, (int)(lx + logoW / 2 + gap), (int)cy - 50, lb, 0, (int)(s2 * 255));
-        float ba = ease((t - 2.4f) / 0.6f);
-        text("by Amir", F22, W / 2, UIH - 120, lb, 1, (int)(ba * 255));
+        gBootIdx = idx;
     }
-    if (t > 3.7f) rect(0, 0, W, UIH, BLACK, (int)(clampf((t - 3.7f) / 0.5f, 0, 1) * 255));
+    rect(0, 0, W, H, BLACK);
+    if (gBootTex) { SDL_Rect d = {0, 0, W, H}; SDL_RenderCopy(gR, gBootTex, nullptr, &d); }
 }
 static void drawLock(float off) {
     int o = (int)off;
@@ -2754,6 +3354,7 @@ int main(int argc, char** argv) {
     loadUser();
     rebuildTiles();
 
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
     SDL_Init(SDL_INIT_VIDEO);
     TTF_Init();
     IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG);
@@ -2762,17 +3363,28 @@ int main(int argc, char** argv) {
     SDL_SetRenderDrawBlendMode(gR, SDL_BLENDMODE_BLEND);
     gTarget = SDL_CreateTexture(gR, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, W, H);
 
+    // fonts: your own Segoe UI (sdmc:/switch/WinNX/segoeui.ttf + segoeuib.ttf) if present, else the built-in
+    // Selawik (Microsoft's open-source Segoe UI look-alike); the Switch system font covers any missing symbols
+    static std::string blobR, blobB;
+    bool haveR = readFile(DIR_ + "segoeui.ttf", blobR) && blobR.size() > 10000;
+    bool haveB = readFile(DIR_ + "segoeuib.ttf", blobB) && blobB.size() > 10000;
     PlFontData fd;
-    if (R_SUCCEEDED(plGetSharedFontByType(&fd, PlSharedFontType_Standard))) {
-        for (int i = 0; i < FCOUNT; i++) {
-            SDL_RWops* rw = SDL_RWFromMem(fd.address, fd.size);
-            gFont[i] = TTF_OpenFontRW(rw, 0, FSZ[i]);
-        }
+    bool haveSys = R_SUCCEEDED(plGetSharedFontByType(&fd, PlSharedFontType_Standard));
+    for (int i = 0; i < FCOUNT; i++) {
+        if (haveSys) gFontSys[i] = TTF_OpenFontRW(SDL_RWFromMem(fd.address, fd.size), 1, FSZ[i]);
+        gFont[i] = haveR ? TTF_OpenFontRW(SDL_RWFromConstMem(blobR.data(), (int)blobR.size()), 1, FSZ[i])
+                         : TTF_OpenFontRW(SDL_RWFromConstMem(SEL_REG, (int)sizeof SEL_REG), 1, FSZ[i]);
+        gFontB[i] = haveB ? TTF_OpenFontRW(SDL_RWFromConstMem(blobB.data(), (int)blobB.size()), 1, FSZ[i])
+                          : TTF_OpenFontRW(SDL_RWFromConstMem(SEL_BOLD, (int)sizeof SEL_BOLD), 1, FSZ[i]);
+        if (!gFont[i]) gFont[i] = gFontSys[i];
+        if (gFont[i]) TTF_SetFontHinting(gFont[i], TTF_HINTING_LIGHT);
+        if (gFontB[i]) TTF_SetFontHinting(gFontB[i], TTF_HINTING_LIGHT);
     }
 
     lockInit();
     uiState = gBootAnim ? 0 : (gLockScr ? 1 : 2);
     updateNow();
+    srand((unsigned)SDL_GetTicks());
     lastInput = SDL_GetTicks();
     Uint32 prev = lastInput, lastClock = 0, lastBat = 0, lastSave = 0, kbHeldT = 0, kbRep = 0;
     bool wasDown = false, tMoved = false, tPressWin = false, tTop = false, tKb = false, tApp = false, tOv = false, wasRaw = false, lkDrag = false;
@@ -2835,6 +3447,7 @@ int main(int argc, char** argv) {
         } else if (curApp >= 0 && appDir == 0) {
             if (kd & HidNpadButton_B) closeApp(false);
             if (kd & HidNpadButton_X) closeApp(true);
+            appKeys(kd);
             if (curApp == A_PHOTOS) {
                 if (kd & HidNpadButton_AnyLeft) photoNav(-1);
                 if (kd & HidNpadButton_AnyRight) photoNav(1);
@@ -3000,7 +3613,7 @@ int main(int argc, char** argv) {
     if (phTex) SDL_DestroyTexture(phTex);
     if (gLockTex) SDL_DestroyTexture(gLockTex);
     for (auto& p : gTC) SDL_DestroyTexture(p.second.t);
-    for (int i = 0; i < FCOUNT; i++) if (gFont[i]) TTF_CloseFont(gFont[i]);
+    for (int i = 0; i < FCOUNT; i++) { if (gFont[i] && gFont[i] != gFontSys[i]) TTF_CloseFont(gFont[i]); if (gFontB[i]) TTF_CloseFont(gFontB[i]); if (gFontSys[i]) TTF_CloseFont(gFontSys[i]); }
     if (gTarget) SDL_DestroyTexture(gTarget);
     SDL_DestroyRenderer(gR);
     SDL_DestroyWindow(gWin);
