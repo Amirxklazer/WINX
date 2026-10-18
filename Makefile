@@ -21,7 +21,21 @@ APP_VERSION	:=	0.5.0
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS	:=	-g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES)
+# Optional features: only built in when their libraries are installed (build.yml installs them),
+# so a missing library can never break the build.
+PKGCONF	:=	$(PORTLIBS)/bin/aarch64-none-elf-pkg-config
+OPTDEFS	:=
+OPTLIBS	:=
+ifneq ($(strip $(shell $(PKGCONF) --exists SDL2_mixer && echo yes)),)
+OPTDEFS	+=	-DWINNX_AUDIO
+OPTLIBS	+=	$(shell $(PKGCONF) --static --libs SDL2_mixer)
+endif
+ifneq ($(strip $(shell $(PKGCONF) --exists libcurl && echo yes)),)
+OPTDEFS	+=	-DWINNX_NET
+OPTLIBS	+=	$(shell $(PKGCONF) --static --libs libcurl)
+endif
+
+CFLAGS	:=	-g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES) $(OPTDEFS)
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__ $(shell sdl2-config --cflags 2>/dev/null)
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 ASFLAGS	:=	-g $(ARCH)
@@ -32,7 +46,7 @@ TTFLIBS	:=	$(shell $(PKGCONF) --static --libs SDL2_ttf SDL2_image 2>/dev/null)
 ifeq ($(strip $(TTFLIBS)),)
 TTFLIBS	:=	-lSDL2_ttf -lSDL2_image -lfreetype -lbz2 -lpng -ljpeg -lz
 endif
-LIBS	:=	$(TTFLIBS) $(shell sdl2-config --libs 2>/dev/null) -lnx
+LIBS	:=	$(OPTLIBS) $(TTFLIBS) $(shell sdl2-config --libs 2>/dev/null) -lnx
 
 LIBDIRS	:=	$(PORTLIBS) $(LIBNX)
 
