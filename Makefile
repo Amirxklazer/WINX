@@ -17,7 +17,7 @@ INCLUDES	:=	.
 
 APP_TITLE	:=	WinNX
 APP_AUTHOR	:=	WinNX
-APP_VERSION	:=	0.5.0
+APP_VERSION	:=	0.8.0
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
@@ -37,7 +37,7 @@ endif
 
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES) $(OPTDEFS)
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__ $(shell sdl2-config --cflags 2>/dev/null)
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
+CXXFLAGS	:= $(CFLAGS) -fno-rtti -std=gnu++17
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
@@ -46,7 +46,7 @@ TTFLIBS	:=	$(shell $(PKGCONF) --static --libs SDL2_ttf SDL2_image 2>/dev/null)
 ifeq ($(strip $(TTFLIBS)),)
 TTFLIBS	:=	-lSDL2_ttf -lSDL2_image -lfreetype -lbz2 -lpng -ljpeg -lz
 endif
-LIBS	:=	$(OPTLIBS) $(TTFLIBS) $(shell sdl2-config --libs 2>/dev/null) -lnx
+LIBS	:=	$(OPTLIBS) $(TTFLIBS) $(shell sdl2-config --libs 2>/dev/null) -lnx -lz
 
 LIBDIRS	:=	$(PORTLIBS) $(LIBNX)
 
