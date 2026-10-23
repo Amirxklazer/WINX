@@ -9,8 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Pin the image. Use the same tag as your working Îlot14 World repo if you know it
-    # (e.g. devkitpro/devkita64:20240202). 'latest' is only the fallback.
+    # Use the same pinned tag as your working repo (e.g. devkitpro/devkita64:20240202); 'latest' is only the fallback.
     container: devkitpro/devkita64:latest
 
     steps:
@@ -19,9 +18,24 @@ jobs:
 
       - name: Install libraries
         run: |
+          export DEVKITPRO=/opt/devkitpro
           if command -v dkp-pacman >/dev/null 2>&1; then PM=dkp-pacman; else PM=pacman; fi
-          $PM -Sy --noconfirm
-          $PM -S --noconfirm --needed switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-libjpeg-turbo switch-libpng switch-freetype switch-pkg-config
+          PL=$DEVKITPRO/portlibs/switch/lib
+          need() { for f in libSDL2.a libSDL2_ttf.a libSDL2_image.a libfreetype.a libpng.a libjpeg.a libz.a libSDL2_mixer.a libcurl.a; do [ -f $PL/$f ] || return 1; done; return 0; }
+          if need; then echo "libraries already in the image, skipping download"; exit 0; fi
+          PKGS="switch-sdl2 switch-sdl2_ttf switch-sdl2_image switch-libjpeg-turbo switch-libpng switch-freetype switch-pkg-config switch-zlib switch-sdl2_mixer switch-curl switch-mbedtls"
+          try() { for i in 1 2 3; do "$@" && return 0; echo "attempt $i failed, retrying in 10s"; sleep 10; done; return 1; }
+          # 1) plain pacman
+          if try $PM -Sy --noconfirm && try $PM -S --noconfirm --needed $PKGS; then exit 0; fi
+          # 2) the server answers 403 to some CI addresses / default pacman user agent: download with curl and a browser-like agent
+          echo "::warning::plain pacman failed (403?), retrying through curl with a browser user agent"
+          CONF=/opt/devkitpro/pacman/etc/pacman.conf; [ -f $CONF ] || CONF=/etc/pacman.conf
+          cp $CONF /tmp/pacman-curl.conf
+          sed -i '/^XferCommand/d' /tmp/pacman-curl.conf
+          sed -i 's|^\[options\]|[options]\nXferCommand = /usr/bin/curl -fL --retry 3 -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36" -C - -o %o %u|' /tmp/pacman-curl.conf
+          if try $PM --config /tmp/pacman-curl.conf -Sy --noconfirm && try $PM --config /tmp/pacman-curl.conf -S --noconfirm --needed $PKGS; then exit 0; fi
+          echo "::error::pkg.devkitpro.org refuses this runner (403). Re-run the job later, or use a devkita64 image tag that already contains the Switch libraries."
+          exit 1
 
       - name: Build
         run: |
@@ -29,11 +43,12 @@ jobs:
           export PATH=$DEVKITPRO/devkitA64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH
           make -j$(nproc)
 
-      - name: Check icon and hbmenu marker are inside the NRO
+      - name: Check icon, hbmenu marker and features
         run: |
           ls -l WinNX.nro
           grep -q "ASET" WinNX.nro || { echo "NRO has no icon asset header"; exit 1; }
           grep -q "WINNX-SELF-MARKER-9c41e7" WinNX.nro || { echo "hbmenu marker missing"; exit 1; }
+          grep -aq "WNXFEAT\[audio net \]" WinNX.nro && echo "audio + Wi-Fi built in" || echo "::warning::built WITHOUT audio and/or Wi-Fi (see the libraries step)"
 
       - name: Upload NRO
         uses: actions/upload-artifact@v4
