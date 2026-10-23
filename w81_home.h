@@ -36,7 +36,7 @@ static void gmLoadOne() {
     if (R_SUCCEEDED(nsGetApplicationControlData(NsApplicationControlSource_Storage, g.id, d, sizeof(NsApplicationControlData), &got)) && got > sizeof(NacpStruct)) {
         NacpLanguageEntry* le = nullptr;
         if (R_SUCCEEDED(nacpGetLanguageEntry(&d->nacp, &le)) && le && le->name[0]) g.name = le->name;
-        else for (int i = 0; i < 16; i++) if (d->nacp.lang_data.lang[i].name[0]) { g.name = d->nacp.lang_data.lang[i].name; break; }
+        else for (int i = 0; i < 16; i++) { const char* nm = (const char*)d + i * 0x300; if (nm[0]) { g.name = std::string(nm, strnlen(nm, 0x200)); break; } }  // NACP: 16 language entries of 0x300 bytes, name first
         size_t isz = (size_t)(got - sizeof(NacpStruct));
         if (isz > 100 && isz <= sizeof(d->icon)) {
             SDL_Surface* sf = IMG_Load_RW(SDL_RWFromConstMem(d->icon, (int)isz), 1);
@@ -87,7 +87,6 @@ static void drawGames(Col bg) {
         SDL_RenderSetClipRect(gR, nullptr);
         if (n == 0) {
             text(gNsMsg.empty() ? "No installed games found." : "Games can't be listed", F30, 76, 200, WHITE, 0, 220);
-            if (!gNsMsg.empty()) for (auto& l : wrapText(gNsMsg, F22, 900)) { static int dummy; (void)dummy; }
             int y = 250; for (auto& l : wrapText(gNsMsg, F22, 900)) { text(l, F22, 76, y, WHITE, 0, 190); y += 30; }
         }
         if (gmSel >= 0 && gmSel < n) {
@@ -158,7 +157,7 @@ static bool copyTree9(const std::string& from, const std::string& to, int depth 
     }
     closedir(d); return ok;
 }
-static bool qlActive, qlBackup, qlPackage, qlAtmos; static std::string qlMsg; static int qlConfirm = 0, qlWhich = 0; static Uint32 qlConfT = 0;
+static bool qlActive, qlBackup, qlPackage, qlAtmos; static std::string qlMsg; static int qlConfirm = 0, qlWhich = 0;
 static void qlRefresh() { qlActive = dirExists9(QL_DIR); qlBackup = dirExists9(qlBackupDir()); qlPackage = dirExists9(qlPackageDir()); qlAtmos = dirExists9("sdmc:/atmosphere"); }
 static void qlRestoreOriginal() {
     if (!qlActive) { qlMsg = "The original HOME menu is already active."; return; }
