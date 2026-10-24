@@ -1,5 +1,6 @@
 // w81_desk.h - Desktop (Windows 8.1 taskbar + Win+X menu) and Help+Tips (included from win81.h)
 
+static void drawIconGallery(int x0, int y0, int w);
 // gSetOpenPage declared in main.cpp
 static void openSettingsPage(int p) { gSetOpenPage = p; setPage = p; setSub = 0; gotoApp(A_SETTINGS); }
 
@@ -115,6 +116,8 @@ static const HelpTopic HELP[] = {
     {"Skype and OneDrive", "Skype keeps contacts and chats on this console. There is no Skype network any more, so conversations are with the Echo / Sound Test Service, Cortana, Skype itself and any contacts you add for your own notes.\n\nOneDrive is a folder on your SD card (switch/WinNX/OneDrive). It is not synced to the cloud. Word, Excel and Notes can be copied into it automatically from PC settings > OneDrive."},
     {"Games", "The Games app shows the games installed on your Switch with their icons, and your homebrew. Tap a game to launch it. The game starts when this app closes.\n\nPausing a running game and replacing the HOME menu need a system-level home menu, which a normal homebrew app can't be. See PC settings > Home menu."},
     {"Sound and themes", "PC settings > Sound has three sound schemes (Windows Default, Chimes, Retro) or none, a volume, and switches for the start-up sound, notification sounds and touch sounds. The Theme Store has more than thirty colour themes."},
+    {"New in 1.0", "Alarms & Clock has alarms that ring even when the app is closed, a world clock, timers and a stopwatch. Sound Recorder records from the mic to the Recordings folder. Food & Drink has more than 30 recipes that work offline, a shopping list and cook mode. Health & Fitness tracks water, steps, sleep, weight and calories and runs guided workouts.\n\nPixel Pet is a companion that keeps living while the app is closed. Metropolis is a city that keeps earning money while you are away. The calculator now has Scientific, Graphing, Programmer, Statistics and Date modes. Cortana remembers notes, knows the time in other cities, counts days to holidays and plays riddles.\n\nOpening an app turns it like a page. Tap Windows 8.1 in PC settings > PC info eight times for a surprise."},
+    {"Icon set", "gallery"},
     {"If something goes wrong", "Hold B and Y while this app starts to jump to the original homebrew menu. If the app crashes it shows a blue screen next time you start it.\n\nIf you installed a custom HOME menu and the console won't start properly, delete atmosphere/contents/0100000000001000 from the SD card on a computer, or use PC settings > Home menu > Restore the original HOME menu."},
 };
 static const int NHELP = (int)(sizeof(HELP) / sizeof(HELP[0]));
@@ -123,14 +126,15 @@ static void drawHelp() {
     rect(0, 0, W, UIH, Col{250, 250, 252});
     rect(0, 0, 400, UIH, Col{232, 120, 20});
     text("Help+Tips", F44, 36, 26, WHITE);
-    for (int i = 0; i < NHELP; i++) { int y = 110 + i * 56; if (i == helpSel) rect(0, y, 400, 52, Col{200, 96, 10}); text(HELP[i].title, F22, 36, y + 10, WHITE); }
+    for (int i = 0; i < NHELP; i++) { int y = 100 + i * 52; if (i == helpSel) rect(0, y, 400, 52, Col{200, 96, 10}); text(HELP[i].title, F22, 36, y + 10, WHITE); }
     int x = 450, w = W - x - 50;
     text(HELP[helpSel].title, F44, x, 26, Col{232, 120, 20});
     SDL_Rect clip{x - 10, 100, w + 20, UIH - 100}; SDL_RenderSetClipRect(gR, &clip);
+    if (std::string(HELP[helpSel].body) == "gallery") { drawIconGallery(x - 10, 96 - helpScroll, w + 20); SDL_RenderSetClipRect(gR, nullptr); return; }
     auto lines = wrapText(HELP[helpSel].body, F22, w); int y = 110 - helpScroll;
     int total = (int)lines.size() * 32; helpScroll = std::max(0, std::min(helpScroll, std::max(0, total - (UIH - 130))));
     for (auto& l : lines) { text(l, F22, x, y, Col{50, 52, 58}); y += 32; }
     SDL_RenderSetClipRect(gR, nullptr);
 }
-static void helpTap(int x, int y) { if (x < 400 && y >= 110) { int i = (y - 110) / 56; if (i >= 0 && i < NHELP) { helpSel = i; helpScroll = 0; } } }
+static void helpTap(int x, int y) { if (x < 400 && y >= 100) { int i = (y - 100) / 52; if (i >= 0 && i < NHELP) { helpSel = i; helpScroll = 0; } } }
 static void helpDrag(int, int dy) { helpScroll = std::max(0, helpScroll - dy); }

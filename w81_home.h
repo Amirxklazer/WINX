@@ -265,8 +265,8 @@ static void oneDrivePageTap(int X, int x, int y) {
 static void drawPcInfoPage(int X) {
     text("PC info", F44, X, 40, Col{70, 90, 120});
     text("Windows edition", F22, X, 112, Col{60, 60, 66});
-    text("Windows 8.1", F44, X, 142, Col{0, 114, 198});
-    text("Version 0.9 for Nintendo Switch", F16, X, 198, Col{120, 120, 128});
+    text("Windows 8.1", F44, X, 142, Col{0, 114, 198});   // tap it 8 times for a surprise
+    text("Version 1.0 for Nintendo Switch", F16, X, 198, Col{120, 120, 128});
     tmSample();
     char b[96]; Col k{120, 120, 128}, v{50, 50, 55}; int y = 244;
     auto row = [&](const char* a, const std::string& s) { text(a, F16, X, y, k); text(s, F22, X + 260, y - 4, v); y += 40; };

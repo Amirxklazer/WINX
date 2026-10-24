@@ -110,6 +110,7 @@ static bool coParseClock(const std::string& q, int& hh, int& mm) {
 static const char* CO_FACTS[] = {"Honey never spoils. Archaeologists have eaten 3,000 year old honey.", "A day on Venus is longer than its year.", "Octopuses have three hearts.", "The first computer mouse was made of wood.", "Bananas are berries, but strawberries are not.", "The Nintendo Switch was released on 3 March 2017.", "There are more possible chess games than atoms in the observable universe.", "Windows 8.1 was released on 17 October 2013."};
 static const char* CO_JOKES[] = {"Why do programmers prefer dark mode? Because light attracts bugs.", "I would tell you a UDP joke, but you might not get it.", "There are 10 kinds of people: those who understand binary and those who don't.", "A SQL query walks into a bar, sees two tables and asks: can I join you?", "Why did the Switch go to therapy? Too many unresolved docks.", "My Wi-Fi and I have a lot in common. We both drop out when it matters.", "I asked the Start screen for a day off. It said it had no tiles to spare."};
 
+static bool coSmart(const std::string& q, const std::string& raw, std::string& o);
 static std::string coReply(const std::string& raw) {
     std::string q = coLow(raw); coCardNext = 0;
     while (!q.empty() && (q.back() == '?' || q.back() == '!' || q.back() == '.' || q.back() == ' ')) q.pop_back();
@@ -118,6 +119,7 @@ static std::string coReply(const std::string& raw) {
     if (!coPending.empty() && (q == "yes" || q == "yeah" || q == "ok" || q == "sure" || q == "yep" || q == "please do")) { std::string s = coPending; coPending.clear(); gUrl = s; pendingApp = A_BROWSER; browserGo(); return "Searching the web for \"" + s + "\"."; }
     coPending.clear();
     if (q.empty()) return "I'm listening.";
+    { std::string o; if (coSmart(q, raw, o)) return o; }
     if (q == "hi" || q == "hello" || q == "hey" || coStarts(q, "good morning") || coStarts(q, "good evening") || coStarts(q, "good afternoon")) return coDayPart() + ", " + gUser + ".";
     if (coHas(q, "how are you") || coHas(q, "how's it going")) return "Running at full speed on a Tegra. How about you?";
     if (coHas(q, "who are you") || coHas(q, "your name") || coHas(q, "who made you")) return "I'm Cortana, your personal assistant in Windows 8.1 on this Switch.";
@@ -409,7 +411,7 @@ static void cortanaDrag(int, int dy) {
 // ================================================================ settings for the v0.9 features (settings9.ini)
 static void win9Save() {
     std::string b; auto kv = [&](const char* k, int v) { b += std::string(k) + "=" + std::to_string(v) + "\n"; };
-    kv("v9", gV9); kv("flip", gFlipMode); kv("flipsecs", gFlipSecs); kv("tilenames", gTileNames); kv("sndscheme", gSndScheme); kv("sndvol", gSndVol);
+    kv("v9", gV9); kv("v10", gV10); kv("flip", gFlipMode); kv("flipsecs", gFlipSecs); kv("tilenames", gTileNames); kv("sndscheme", gSndScheme); kv("sndvol", gSndVol);
     kv("sndstartup", gSndStartup); kv("sndnotify", gSndNotify); kv("sndtouch", gSndTouch); kv("bootdesk", gBootDesk); kv("cosumm", gCoSumm); kv("coint", gCoInt); kv("odauto", gOdAuto); kv("skyaway", gSkyAway);
     writeFile(DIR_ + "settings9.ini", b);
 }
@@ -418,7 +420,7 @@ static void win9Load() {
     for (auto& l : w9Split(s, '\n')) {
         size_t q = l.find('='); if (q == std::string::npos) continue;
         std::string k = l.substr(0, q); int n = atoi(l.c_str() + q + 1);
-        if (k == "v9") gV9 = n != 0; else if (k == "flip") gFlipMode = std::max(0, std::min(2, n)); else if (k == "flipsecs") gFlipSecs = std::max(3, std::min(30, n));
+        if (k == "v9") gV9 = n != 0; else if (k == "v10") gV10 = n != 0; else if (k == "flip") gFlipMode = std::max(0, std::min(2, n)); else if (k == "flipsecs") gFlipSecs = std::max(3, std::min(30, n));
         else if (k == "tilenames") gTileNames = n != 0; else if (k == "sndscheme") gSndScheme = std::max(0, std::min(3, n)); else if (k == "sndvol") gSndVol = std::max(0, std::min(10, n));
         else if (k == "sndstartup") gSndStartup = n != 0; else if (k == "sndnotify") gSndNotify = n != 0; else if (k == "sndtouch") gSndTouch = n != 0;
         else if (k == "bootdesk") gBootDesk = n != 0; else if (k == "cosumm") gCoSumm = n != 0; else if (k == "coint") gCoInt = n; else if (k == "odauto") gOdAuto = n != 0; else if (k == "skyaway") gSkyAway = n != 0;
@@ -522,3 +524,4 @@ static void sndPreview(int scheme, int id) { if (gSndVol == 0) return; sndPlaySc
 
 #include "w81_apps.h"
 #include "w81_desk.h"
+#include "w82.h"

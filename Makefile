@@ -17,7 +17,7 @@ INCLUDES	:=	.
 
 APP_TITLE	:=	WinNX
 APP_AUTHOR	:=	WinNX
-APP_VERSION	:=	0.9.0
+APP_VERSION	:=	1.0.0
 
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 

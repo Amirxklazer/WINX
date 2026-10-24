@@ -1,0 +1,11 @@
+// w82.h - v1.0 additions (included from the end of win81.h)
+#include "w82_ui.h"
+#include "w82_fx.h"
+#include "w82_clock.h"
+#include "w82_rec.h"
+#include "w82_food.h"
+#include "w82_health.h"
+#include "w82_pet.h"
+#include "w82_city.h"
+#include "w82_calc.h"
+#include "w82_cortana.h"

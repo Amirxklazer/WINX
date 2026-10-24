@@ -1,4 +1,4 @@
-// WinNX v0.9.0 - Windows 8.1-style tablet shell for Nintendo Switch (SDL2 + libnx)
+// WinNX v1.0.0 - Windows 8.1-style tablet shell for Nintendo Switch (SDL2 + libnx)
 // v0.9 additions (Cortana, Skype, OneDrive, Task Manager, Desktop, Help+Tips, sound, flip tiles) live in win81.h
 // Touch-first. Black "bezel" strip at the bottom holds the Windows button (OLED friendly).
 // Everything you write (Notes, Word, Excel) autosaves to sdmc:/switch/WinNX/ and reloads next time.
@@ -139,6 +139,8 @@ static bool gBootDesk = false;       // open the Desktop after signing in
 static bool gCoSumm = true;          // Cortana summaries
 static int gCoInt = 63;              // Cortana interests (bitmask)
 static bool gOdAuto = true;          // OneDrive: keep a copy of Word, Excel and Notes
+static bool gV10 = false;
+static bool fxReady(); static void fxAppTurn(float); static void fxTileTurn(const struct Tile&, SDL_Rect, float); static void eggCount();
 static bool gV9 = false;             // first run of v0.9 pins the new apps
 static bool gSkyAway = false;
 enum { SND_STARTUP, SND_NOTIFY, SND_UNLOCK, SND_ERROR, SND_CLICK, SND_RING, SND_COUNT };
@@ -389,7 +391,7 @@ static bool endsWith(const std::string& s, const std::string& e) { return s.size
 enum { A_MAIL, A_MUSIC, A_PHOTOS, A_DESKTOP, A_CALENDAR, A_STORE, A_CALC, A_NOTES, A_WEATHER, A_CLOCK, A_SETTINGS, A_POWER, A_GAMES, A_WORD, A_EXCEL,
        A_BROWSER, A_PAINT, A_SOLITAIRE, A_2048, A_MINES, A_SNAKE, A_TODO, A_FILES, A_TASKMGR, A_TIMER, A_NEWS, A_ROBLOX,
        A_MAPS, A_CAMERA, A_PODCASTS, A_RADIO, A_PDF, A_TERM, A_PS, A_CHESS, A_THEMES, A_CONV, A_BLOCKS, A_LIGHT, A_WORLD, A_DICT, A_CORTANA,
-       A_SKYPE, A_ONEDRIVE, A_HELP, A_COUNT };
+       A_SKYPE, A_ONEDRIVE, A_HELP, A_RECORDER, A_FOOD, A_HEALTH, A_PET, A_CITY, A_COUNT };
 
 // key = name used in layout.dat, sys = built in (always there, can only be unpinned), w,h = default tile size in half-cells
 struct AppDef { const char* key; const char* name; Col col; int w, h; bool sys; };
@@ -439,6 +441,11 @@ static const AppDef ADEF[A_COUNT] = {
     /* A_SKYPE    */ {"skype", "Skype", {0, 175, 240}, 2, 2, true},
     /* A_ONEDRIVE */ {"onedrive", "OneDrive", {20, 90, 180}, 2, 2, true},
     /* A_HELP     */ {"help", "Help+Tips", {232, 120, 20}, 2, 2, true},
+    /* A_RECORDER */ {"recorder", "Sound Recorder", {196, 30, 60}, 2, 2, true},
+    /* A_FOOD     */ {"food", "Food & Drink", {200, 90, 20}, 4, 2, true},
+    /* A_HEALTH   */ {"health", "Health & Fitness", {0, 150, 100}, 4, 2, true},
+    /* A_PET      */ {"pet", "Pixel Pet", {230, 120, 160}, 2, 2, true},
+    /* A_CITY     */ {"city", "Metropolis", {30, 120, 150}, 4, 2, true},
 };
 static int appByKey(const std::string& k) {
     for (int i = 0; i < A_COUNT; i++) if (k == ADEF[i].key) return i;
@@ -473,7 +480,7 @@ static const SApp STORE[] = {
 };
 static const int NSTORE = (int)(sizeof(STORE) / sizeof(STORE[0]));
 static bool gInst[A_COUNT];
-static float gAppMemMB[A_COUNT]; static bool gSkyDirty = false; static int gSetOpenPage = -1; static void gmInit(); static void gmUpdate(); static void gamesTap(int, int); static bool gamesBack(); static void skySave(); static float tmUsedMB();
+static float gAppMemMB[A_COUNT]; static bool gSkyDirty = false; static int gSetOpenPage = -1; static int gCalcMode = 0; static void calcDrawMode(const Theme&); static void calcModeBtn(int y); static void calcMenuDraw(); static bool calcTapMode(int, int); static void calcDragMode(int, int); static bool calcBack(); static void gmInit(); static void gmUpdate(); static void gamesTap(int, int); static bool gamesBack(); static void skySave(); static float tmUsedMB();
 static const char* CATS[5] = {"Games", "Productivity", "Internet", "Art", "Tools"};
 static bool appAvail(int a) { return a >= 0 && a < A_COUNT && (ADEF[a].sys || gInst[a]); }
 static std::string appName(int app) { return (app >= 0 && app < A_COUNT) ? ADEF[app].name : "App"; }
@@ -1914,6 +1921,7 @@ static bool gSciErr = false;
 static std::string gSciExpr; static double gSciAns = 0; static bool gSciDone = false;
 struct SciP { const char* s; size_t i; bool err; };
 static double sciExpr(SciP& p);
+static bool sciExt(SciP& p, double& out);   // extra functions, constants and the graphing variable x (w82_calc.h)
 static void sciWs(SciP& p) { while (p.s[p.i] == ' ') p.i++; }
 static double sciFact(double x) { if (x < 0 || x > 170 || x != floor(x)) return NAN; double r = 1; for (int i = 2; i <= (int)x; i++) r *= i; return r; }
 static double sciPrimary(SciP& p) {
@@ -1923,6 +1931,7 @@ static double sciPrimary(SciP& p) {
     if ((c >= '0' && c <= '9') || c == '.') { char* e; double v = strtod(p.s + p.i, &e); p.i = e - p.s; return v; }
     if (strncmp(p.s + p.i, "pi", 2) == 0) { p.i += 2; return M_PI; }
     if (strncmp(p.s + p.i, "Ans", 3) == 0) { p.i += 3; return gSciAns; }
+    { double xv; if (sciExt(p, xv)) return xv; }
     if (c == 'e' && p.s[p.i + 1] != 'x') { p.i++; return M_E; }
     static const char* FN[] = {"asin", "acos", "atan", "sin", "cos", "tan", "ln", "log", "sqrt", "abs", "cbrt", nullptr};
     for (int k = 0; FN[k]; k++) {
@@ -1971,6 +1980,7 @@ static double sciTerm(SciP& p) {
         char c = p.s[p.i];
         if (c == '*') { p.i++; v *= sciUnary(p); }
         else if (c == '/') { p.i++; v /= sciUnary(p); }
+        else if (strncmp(p.s + p.i, "mod", 3) == 0) { p.i += 3; v = fmod(v, sciUnary(p)); }
         else if (c == '(' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.') v *= sciPow(p); // 2pi, 3(4)
         else break;
     }
@@ -2793,7 +2803,7 @@ static void saveAll() {
     // @@SAVE@@
 }
 static std::string gPhotoOpenPath, gPdfOpenPath;
-static void bsodNow(const std::string& code, const std::string& detail); static void cortanaInit(); static void blocksInit(); static void camInit(); static void camStop(); static void pdfInit(); static void chessInit(); static void filesInit(); static void termInit(int which); static void podInit(); static void radioInit(); static void mapsInit(); static void mapsClose(); static void weatherInit(); static void mailInit(); static void newsInit(); static void robloxInit(); static void skyInit(); static void odInit();
+static void bsodNow(const std::string& code, const std::string& detail); static void cortanaInit(); static void blocksInit(); static void camInit(); static void camStop(); static void pdfInit(); static void chessInit(); static void filesInit(); static void termInit(int which); static void podInit(); static void radioInit(); static void mapsInit(); static void mapsClose(); static void weatherInit(); static void mailInit(); static void newsInit(); static void robloxInit(); static void skyInit(); static void odInit(); static void clkInit(); static void recInit(); static void foodInit(); static void hlInit(); static void petInit(); static void cityInit();
 static void appInit(int app) {
     std::string d;
     switch (app) {
@@ -2833,6 +2843,12 @@ static void appInit(int app) {
         case A_PS: termInit(1); break;
         case A_SKYPE: skyInit(); break;
         case A_ONEDRIVE: odInit(); break;
+        case A_CLOCK: clkInit(); break;
+        case A_RECORDER: recInit(); break;
+        case A_FOOD: foodInit(); break;
+        case A_HEALTH: hlInit(); break;
+        case A_PET: petInit(); break;
+        case A_CITY: cityInit(); break;
         // @@INIT@@
         default: break;
     }
@@ -3123,6 +3139,23 @@ static void drawIcon(int app, int cx, int cy, Col bg) {
             rect(cx - 4, cy + 16, 8, 8, WHITE); rect(cx - 16, cy + 24, 32, 4, WHITE);
             rect(cx - 25, cy - 19, 50, 8, WHITE, 70);
             break;
+        case A_RECORDER:
+            rect(cx - 9, cy - 26, 18, 32, WHITE); ring(cx, cy + 6, 20, 4, WHITE, bg); rect(cx - 2, cy + 24, 4, 10, WHITE); rect(cx - 12, cy + 32, 24, 4, WHITE);
+            break;
+        case A_FOOD:
+            ring(cx, cy, 28, 4, WHITE, bg); rect(cx - 36, cy - 26, 4, 52, WHITE); rect(cx + 34, cy - 26, 4, 52, WHITE); rect(cx - 6, cy - 14, 12, 28, WHITE, 120);
+            break;
+        case A_HEALTH:
+            line(cx - 30, cy + 4, cx - 14, cy + 4, 4, WHITE); line(cx - 14, cy + 4, cx - 6, cy - 22, 4, WHITE); line(cx - 6, cy - 22, cx + 6, cy + 24, 4, WHITE); line(cx + 6, cy + 24, cx + 14, cy + 4, 4, WHITE); line(cx + 14, cy + 4, cx + 30, cy + 4, 4, WHITE);
+            break;
+        case A_PET:
+            disc(cx, cy + 4, 26, WHITE); tri(cx - 24, cy - 12, cx - 12, cy - 34, cx - 4, cy - 14, WHITE); tri(cx + 24, cy - 12, cx + 12, cy - 34, cx + 4, cy - 14, WHITE);
+            disc(cx - 9, cy, 4, bg); disc(cx + 9, cy, 4, bg); rect(cx - 3, cy + 8, 6, 3, bg);
+            break;
+        case A_CITY:
+            rect(cx - 32, cy - 4, 20, 36, WHITE); rect(cx - 8, cy - 28, 22, 60, WHITE); rect(cx + 18, cy + 6, 16, 26, WHITE);
+            for (int i = 0; i < 4; i++) rect(cx - 3, cy - 22 + i * 12, 8, 6, bg);
+            break;
         case A_TIMER:
             ring(cx, cy + 4, 24, 4, WHITE, bg); rect(cx - 6, cy - 26, 12, 6, WHITE);
             line(cx, cy + 4, cx + 10, cy - 8, 4, WHITE);
@@ -3135,7 +3168,7 @@ static void drawIcon(int app, int cx, int cy, Col bg) {
 static int gWifiBars = 0;                  // 0 = offline, 1..3 = connected (filled in by the network module)
 static bool liveTileDraw(const Tile& t, SDL_Rect r, float phase, bool& drewAll);
 static bool liveCapable(int app) {
-    switch (app) { case A_WEATHER: case A_CALENDAR: case A_MAIL: case A_MUSIC: case A_PHOTOS: case A_NEWS: case A_CLOCK: case A_SKYPE: case A_TASKMGR: case A_ONEDRIVE: case A_CORTANA: return true; default: return false; }
+    switch (app) { case A_WEATHER: case A_CALENDAR: case A_MAIL: case A_MUSIC: case A_PHOTOS: case A_NEWS: case A_CLOCK: case A_SKYPE: case A_TASKMGR: case A_ONEDRIVE: case A_CORTANA: case A_PET: case A_CITY: case A_HEALTH: case A_FOOD: case A_RECORDER: return true; default: return false; }
 }
 static void fdiscA(float cx, float cy, float r, Col c, int a) {
     const int N = 48;
@@ -3489,14 +3522,16 @@ static void drawTiles(int pressTile, float pressP, float introOffBase, bool useI
     for (int i = 0; i < (int)gTiles.size(); i++) {
         if (gDrag && i == gDragTile) continue;
         SDL_Rect r = tileScreen(i);
+        float tIn = 1.0f;
         if (useIntro) {
-            float t = ease((introT - 0.05f * (r.x + scrollX - LEFT) / 160.0f - 0.0f) / 0.45f);
+            float t = ease((introT - 0.06f * (r.x + scrollX - LEFT) / 160.0f - 0.04f * (r.y / 160.0f)) / 0.55f);
             if (!gAnim) t = 1;
-            r.x += (int)((1.0f - t) * 320.0f);
+            tIn = t; r.x += (int)((1.0f - t) * 140.0f);
         }
         r.x += (int)introOffBase;
         if (r.x > W || r.x + r.w < 0) continue;
         bool pr = pressTile == i;
+        if (useIntro && tIn < 1.0f && gAnim) { fxTileTurn(gTiles[i], r, tIn); continue; }
         drawTileRect(gTiles[i], r, pr ? pressP : 0, (navMode && sel == i && !gEdit) || (gEdit && gEditSel == i), gEdit, false);
     }
 }
@@ -5406,7 +5441,7 @@ static void curlCommon(CURL* c, NetJob& j) {
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 40L);
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);   // the Switch has no CA bundle; see the About page
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "Windows81/0.9.0 (Nintendo Switch)");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "Windows81/1.0.0 (Nintendo Switch)");
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
     if (!j.savePath.empty()) {
         j.t0 = SDL_GetTicks();
@@ -8907,6 +8942,11 @@ static bool liveTileDraw(const Tile& t, SDL_Rect r, float phase, bool& drewAll) 
             text("OneDrive", F16, cx + 10, cy + r.h - 26, WHITE);
             drewAll = true; return true;
         }
+        case A_PET: return petLive(t, r, drewAll);
+        case A_CITY: return cityLive(t, r, drewAll);
+        case A_HEALTH: return hlLive(t, r, drewAll);
+        case A_FOOD: return foodLive(t, r, drewAll);
+        case A_RECORDER: return recLive(t, r, drewAll);
         case A_CORTANA: {
             if (small) return false;
             disc(cx + r.w / 2, cy + r.h / 2 - 14, 30, WHITE); disc(cx + r.w / 2, cy + r.h / 2 - 14, 23, tileColor(t)); disc(cx + r.w / 2, cy + r.h / 2 - 14, 13, WHITE);
@@ -8933,6 +8973,8 @@ static void appTouch(int phase, int x, int y) {
         case A_BLOCKS: blocksTouch(phase, x, y); break;
         case A_LIGHT: lightTouch(phase, x, y); break;
         case A_DESKTOP: desktopTouch(phase, x, y); break;
+        case A_CITY: cityTouch(phase, x, y); break;
+        case A_PET: petTouch(phase, x, y); break;
         case A_SKYPE: if (phase == 0) skyDownX = x; break;
         // @@TOUCH@@
         default: break;
@@ -9056,7 +9098,7 @@ static void appUpdate(float dt) {
         while (sAcc >= stepT && sState == 1) { sAcc -= stepT; snakeStep(); }
     }
     musTick(dt);
-    tmSample(); skyUpdate(); oneDriveUpdate(dt); desktopUpdate(); gmUpdate();
+    tmSample(); skyUpdate(); oneDriveUpdate(dt); desktopUpdate(); gmUpdate(); eggUpdate(dt); clkUpdate(dt); recUpdate(dt); foodUpdate(dt); hlUpdate(dt); petUpdate(dt); cityUpdate(dt);
     // @@UPDATE@@
 }
 
@@ -9553,6 +9595,8 @@ static void settingsTapImpl(int x, int y) {
     if (gSetup) return;
     for (int i = 0; i < SP_N; i++) if (inR(x, y, 0, SP_Y(i), 440, 38)) { setPage = i; setSub = 0; return; }
     int X = 500;
+    if (setPage == 10 && inR(x, y, X, 130, 360, 70)) { eggCount(); return; }
+    if (setPage == 11 && inR(x, y, X, 100, 600, 40)) { eggCount(); return; }
     if (setPage == 1 && usersTap(x, y)) return;
     if (setPage == 0) {
         static const char* SUB[4] = {"Lock screen", "Start screen", "Tiles", "Account picture"};
@@ -9617,9 +9661,9 @@ static void drawApp() {
     int bottom = areaBottom();
     switch (curApp) {
         case A_CALC: {
-            if (gSci) { drawSci(th); rect(SCI_TX, SCI_TY, SCI_TW, SCI_TH, Col{70, 70, 76}); text("Standard", F22, SCI_TX + SCI_TW / 2, SCI_TY + 6, WHITE, 1); break; }
+            if (gCalcMode != 0) { calcDrawMode(th); break; }
             rect(0, 0, W, UIH, bg);
-            rect(SCI_TX, SCI_TY + 14, SCI_TW, SCI_TH, Col{70, 70, 76}); text("Scientific", F22, SCI_TX + SCI_TW / 2, SCI_TY + 20, WHITE, 1);
+            calcModeBtn(SCI_TY + 14);
             rect(348, 34, 584, 124, Col{42, 42, 42});
             if (cOp) {
                 const char* sym[5] = {"", "+", "-", "\xC3\x97", "\xC3\xB7"};
@@ -9637,17 +9681,15 @@ static void drawApp() {
                 rect(r.x, r.y, r.w, r.h, c);
                 text(l, F44, r.x + r.w / 2, r.y + r.h / 2 - 28, WHITE, 1);
             }
+            calcMenuDraw();
             break;
         }
-        case A_CLOCK: {
-            rect(0, 0, W, UIH, bg);
-            text(timeStr(), F130, W / 2, 130, WHITE, 1);
-            char s[8]; snprintf(s, sizeof s, "%02d", gNow.s);
-            text(s, F44, W / 2, 300, WHITE, 1, 200);
-            if (!g24) text(gNow.h >= 12 ? "PM" : "AM", F30, W / 2, 370, WHITE, 1, 200);
-            text(dateStr(), F44, W / 2, 440, WHITE, 1);
-            break;
-        }
+        case A_CLOCK: drawClock(bg); break;
+        case A_RECORDER: drawRec(); break;
+        case A_FOOD: drawFood(); break;
+        case A_HEALTH: drawHealth(); break;
+        case A_PET: drawPet(); break;
+        case A_CITY: drawCity(); break;
         case A_CALENDAR: drawCalendar(); break;
         case A_SETTINGS: drawSettings(th); break;
         case A_POWER: {
@@ -9782,8 +9824,7 @@ static void settingsTap(int x, int y, const Theme& th) { (void)th; settingsTapIm
 static void appTap(int x, int y) {
     switch (curApp) {
         case A_CALC:
-            if (inR(x, y, SCI_TX, SCI_TY + (gSci ? 0 : 14), SCI_TW, SCI_TH)) { gSci = !gSci; saveCfg(); break; }
-            if (gSci) { sciTap(x, y); break; }
+            if (calcTapMode(x, y)) break;
             for (int i = 0; i < NCB; i++) {
                 SDL_Rect r = calcRect(CBTNS[i]);
                 if (inR(x, y, r.x, r.y, r.w, r.h)) { calcPress(CBTNS[i].l); break; }
@@ -9832,6 +9873,12 @@ static void appTap(int x, int y) {
         case A_CHESS: chessTap(x, y); break;
         case A_TERM: case A_PS: gTermCur = curApp == A_PS ? 1 : 0; termTap(x, y); break;
         case A_DESKTOP: desktopTap(x, y); break;
+        case A_CLOCK: clkTap(x, y); break;
+        case A_RECORDER: recTap(x, y); break;
+        case A_FOOD: foodTap(x, y); break;
+        case A_HEALTH: hlTap(x, y); break;
+        case A_PET: petTap(x, y); break;
+        case A_CITY: cityTap(x, y); break;
         case A_HELP: helpTap(x, y); break;
         case A_SKYPE: skypeTap(x, y); break;
         case A_ONEDRIVE: oneDriveTap(x, y); break;
@@ -9858,6 +9905,13 @@ static void appDrag(int dx, int dy) {
         case A_RADIO: radioDrag(dx, dy); break;
         case A_CORTANA: cortanaDrag(dx, dy); break;
         case A_HELP: helpDrag(dx, dy); break;
+        case A_CALC: calcDragMode(dx, dy); break;
+        case A_CLOCK: clkDrag(dx, dy); break;
+        case A_RECORDER: recDrag(dx, dy); break;
+        case A_FOOD: foodDrag(dx, dy); break;
+        case A_HEALTH: hlDrag(dx, dy); break;
+        case A_PET: petDrag(dx, dy); break;
+        case A_CITY: cityDrag(dx, dy); break;
         case A_SKYPE: skypeDrag(dx, dy); break;
         case A_ONEDRIVE: oneDriveDrag(dx, dy); break;
         case A_TASKMGR: taskMgrDrag(dx, dy); break;
@@ -10245,6 +10299,8 @@ static void drawSwitcher() {
     }
 }
 static void overlayTap(int x, int y) {
+    if (gEgg) { eggTap(); return; }
+    if (clkRinging()) { clkOverlayTap(x, y); return; }
     if (searchOpen) {
         if (x < W - 440) { closeOverlays(); if (kbTarget == 6) kbOpen = false; return; }
         if (inR(x, y, W - 420, 92, 400, 52)) { openKb(6); return; }
@@ -10370,6 +10426,13 @@ static bool appBack() {
         case A_PODCASTS: return podcastsBack();
         case A_DESKTOP: return desktopBack();
         case A_GAMES: return gamesBack();
+        case A_CALC: return calcBack();
+        case A_CLOCK: return clkBack();
+        case A_RECORDER: return recBack();
+        case A_FOOD: return foodBack();
+        case A_HEALTH: return hlBack();
+        case A_PET: return petBack();
+        case A_CITY: return cityBack();
         case A_SKYPE: return skypeBack();
         case A_ONEDRIVE: return oneDriveBack();
         // @@BACK@@
@@ -10631,6 +10694,7 @@ int main(int argc, char** argv) {
     notifLoad();
     rebuildTiles();
     if (!gV8) { pinApp(A_CORTANA); pinApp(A_THEMES); gV8 = true; saveCfg(); saveLayout(); }
+    if (!gV10) { pinApp(A_RECORDER); pinApp(A_FOOD); pinApp(A_HEALTH); pinApp(A_PET); pinApp(A_CITY); gV10 = true; win9Save(); saveLayout(); }
     if (!gV9) { pinApp(A_DESKTOP); pinApp(A_SKYPE); pinApp(A_ONEDRIVE); pinApp(A_TASKMGR); pinApp(A_HELP); gV9 = true; win9Save(); saveLayout(); }
     if (gInstLegacy) { saveCfg(); saveLayout(); }
 
@@ -10793,7 +10857,8 @@ int main(int argc, char** argv) {
             tPressWin = inWinBtn(tx, ty);
             tDownT = now; tHoldR = false; tBot = false; tWinLong = false; swDragApp = -1; swDragX = 0;
             tBot = ty >= UIH - 8 && !overlayOpen() && !gPhone;
-            if (!tPressWin && !overlayOpen() && bannerHit(tx, ty)) { tOv = true; tKb = true; }
+            if (clkRinging() || gEgg) { tOv = true; tKb = true; }
+            else if (!tPressWin && !overlayOpen() && bannerHit(tx, ty)) { tOv = true; tKb = true; }
             else if (!tPressWin && overlayOpen()) {
                 if (kbOpen && ty >= KBTOP && ty < UIH) {
                     buildKeys();
@@ -10871,7 +10936,7 @@ int main(int argc, char** argv) {
             if (scrollX < 0 || scrollX > maxScroll) { scrollX = clampf(scrollX, 0, maxScroll); scrollV = 0; }
         }
         if (appDir != 0) {
-            appT += appDir * dt * 3.6f;
+            appT += appDir * dt * 2.6f;
             if (appT >= 1) { appT = 1; appDir = 0; }
             else if (appT <= 0) {
                 appT = 0; appDir = 0;
@@ -10914,9 +10979,16 @@ int main(int argc, char** argv) {
         SDL_RenderClear(gR);
         bool phoneOn = gPhone && uiState == 2;
         if (uiState != 3 && !(phoneOn && curApp < 0)) try {
+        bool fxOn = curApp >= 0 && appT < 1 && gAnim && gSnap < 0 && fxReady();
+        if (fxOn) SDL_SetRenderTarget(gR, gTurnA);
         drawStart(down, tMoved, pressTile);
         if (curApp >= 0) {
-            if (appT < 1) {
+            if (appT < 1 && fxOn) {
+                SDL_SetRenderTarget(gR, gTurnB); SDL_RenderSetClipRect(gR, nullptr); SDL_SetRenderDrawColor(gR, 0, 0, 0, 255); SDL_RenderClear(gR);
+                drawApp(); SDL_RenderSetClipRect(gR, nullptr);
+                SDL_SetRenderTarget(gR, gTarget); SDL_SetRenderDrawColor(gR, 0, 0, 0, 255); SDL_RenderClear(gR);
+                fxAppTurn(appT);
+            } else if (appT < 1) {
                 SDL_Rect a = gAnimRect;
                 float e = ease(appT);
                 int rx = (int)(a.x + (0 - a.x) * e), ry = (int)(a.y + (0 - a.y) * e);
@@ -10938,6 +11010,7 @@ int main(int argc, char** argv) {
             if (kbOpen && kbTarget == 6) drawKb();
             drawBanner();
             drawToast();
+            clkDrawOverlay(); eggDraw();
         }
         } catch (const std::exception& e) { SDL_RenderSetClipRect(gR, nullptr); bsodNow("UNHANDLED_EXCEPTION", e.what()); }
         catch (...) { SDL_RenderSetClipRect(gR, nullptr); bsodNow("UNHANDLED_EXCEPTION", ""); }
